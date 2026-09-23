@@ -117,6 +117,14 @@ async function sessionUserId(env: Env, token: string): Promise<string> {
 export async function onRequest(context: FunctionContext): Promise<Response> {
   const { request, env, params } = context
 
+  // 鉴权先于配置检查: 未登录的请求一律 401。反过来(先查 PB_ORIGIN)会让匿名请求
+  // 从错误信息里看出"这台机没配 PB_ORIGIN" —— 既泄漏部署状态, 也不符合
+  // DEPLOY.md 的验收项「未登录请求 /api/pb/... → 401」。
+  const userId = await sessionUserId(env, readCookie(request, COOKIE_NAME))
+  if (!userId) {
+    return jsonResponse(401, { error: "admin_login_required", message: "请先登录管理员账号" })
+  }
+
   const origin = String(env.PB_ORIGIN || "").trim().replace(/\/+$/, "")
   if (!origin) {
     return jsonResponse(500, {
@@ -129,11 +137,6 @@ export async function onRequest(context: FunctionContext): Promise<Response> {
       error: "pb_origin_invalid",
       message: "PB_ORIGIN 必须以 http:// 或 https:// 开头",
     })
-  }
-
-  const userId = await sessionUserId(env, readCookie(request, COOKIE_NAME))
-  if (!userId) {
-    return jsonResponse(401, { error: "admin_login_required", message: "请先登录管理员账号" })
   }
 
   const segments = params.path
