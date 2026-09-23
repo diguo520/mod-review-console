@@ -790,6 +790,18 @@ function githubErrorText(data: unknown): string {
   return ""
 }
 
+/**
+ * 上游失败 → 对外状态码。这里刻意**不用 5xx**：Cloudflare 会把 Pages Functions 的 5xx
+ * 响应体整个换成它自己的错误页（线上实测：只剩空的 text/plain），失败原因就再也看不见了。
+ * 回 4xx 才能把 detail / trace 带到调用方眼前。
+ */
+function syncFailureStatus(upstream: number): number {
+  if (upstream === 401 || upstream === 403) return 403
+  if (upstream === 404) return 404
+  if (upstream === 409 || upstream === 422) return 409
+  return 424
+}
+
 type CommitResult = { ok: boolean; status: number; commit: string; stage: string; message: string }
 
 /**
@@ -879,7 +891,7 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
     return await indexSyncInner(env, db, request)
   } catch (err) {
     const e = err as { message?: string; stack?: string }
-    return jsonResponse(500, {
+    return jsonResponse(424, {
       error: "index_sync_crashed",
       message: String((e && e.message) || err),
       detail: String((e && e.stack) || ""),
@@ -892,7 +904,7 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
   const dryRun = raw.dryRun === true
 
   if (!String(env.GITHUB_TOKEN || "")) {
-    return jsonResponse(500, {
+    return jsonResponse(424, {
       error: "github_token_missing",
       message: "部署缺少 GITHUB_TOKEN，无法写入索引仓库",
     })
@@ -909,7 +921,7 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
   const sourcesFile = await readIndexRepoFile(env, INDEX_SOURCES_FILE)
   const moderationFile = await readIndexRepoFile(env, INDEX_MODERATION_FILE)
   if (!sourcesFile.ok || !moderationFile.ok) {
-    return jsonResponse(502, {
+    return jsonResponse(424, {
       error: "index_file_unreadable",
       message: "读不到索引仓库的 sources.json / moderation.json",
       detail: { sources: sourcesFile.status, moderation: moderationFile.status },
@@ -1030,9 +1042,12 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
       trace,
     )
     if (!written.ok) {
-      return jsonResponse(502, {
+      return jsonResponse(syncFailureStatus(written.status), {
         error: "index_commit_failed",
-        message: "写入索引仓库失败（HTTP " + written.status + "），决定保持未同步，下次会重试",
+        message:
+          written.status === 401 || written.status === 403
+            ? "写入被 GitHub 拒绝（HTTP " + written.status + "）：令牌缺少 Contents: Read and write 权限，决定保持未同步，下次会重试"
+            : "写入索引仓库失败（HTTP " + written.status + "），决定保持未同步，下次会重试",
         stage: written.stage,
         detail: written.message,
         trace: trace,
@@ -1068,55 +1083,6 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
     notes: notes,
     stampError: stampError,
   })
-}
-
-/**
- * 临时诊断端点：逐个跑提交链路上的单个动作，用来判断线上究竟卡在哪一步。
- * 排查完必须删掉（见 README 的「自动上架」一节）。
- */
-async function indexDebug(env: Env, request: Request): Promise<Response> {
-  const raw = (await request.json().catch(() => ({}))) as { step?: unknown; status?: unknown }
-  const step = String(raw.step === undefined ? "" : raw.step)
-  const base = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO
-  const out: Record<string, unknown> = { step: step, tokenPrefix: String(env.GITHUB_TOKEN || "").slice(0, 10) }
-
-  if (step === "echo") {
-    const status = Number(raw.status) || 200
-    return jsonResponse(status, { ok: true, echo: status })
-  }
-  if (step === "ref-read") {
-    const r = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
-    out.status = r.status
-    out.data = r.data
-  } else if (step === "blob-post") {
-    const r = await githubCall(env, base + "/git/blobs", "POST", { content: "{\"probe\":1}\n", encoding: "utf-8" })
-    out.status = r.status
-    out.data = r.data
-  } else if (step === "tree-post") {
-    const head = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
-    const headSha = isPlainObject(head.data) && isPlainObject(head.data.object) ? String(head.data.object.sha || "") : ""
-    const c = await githubCall(env, base + "/git/commits/" + headSha, "GET")
-    const treeSha = isPlainObject(c.data) && isPlainObject(c.data.tree) ? String(c.data.tree.sha || "") : ""
-    const r = await githubCall(env, base + "/git/trees", "POST", {
-      base_tree: treeSha,
-      tree: [{ path: "__probe__.tmp", mode: "100644", type: "blob", sha: "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" }],
-    })
-    out.status = r.status
-    out.data = r.data
-  } else if (step === "ref-patch-same") {
-    const head = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
-    const headSha = isPlainObject(head.data) && isPlainObject(head.data.object) ? String(head.data.object.sha || "") : ""
-    const r = await githubCall(env, base + "/git/refs/heads/" + SYNC_BRANCH, "PATCH", { sha: headSha, force: false })
-    out.status = r.status
-    out.data = r.data
-  } else if (step === "stringify") {
-    const f = await readIndexRepoFile(env, INDEX_MODERATION_FILE)
-    out.status = f.status
-    out.textLength = JSON.stringify(f.json, null, 2).length
-  } else {
-    return jsonResponse(400, { error: "unknown_step", step: step })
-  }
-  return jsonResponse(200, out)
 }
 
 // —— 路由 ——
@@ -1165,10 +1131,6 @@ export async function onRequest(context: FunctionContext): Promise<Response> {
   if (path === "api/index/sync") {
     if (method !== "POST") return methodNotAllowed(method)
     return indexSync(env, db, request)
-  }
-  if (path === "api/index/debug") {
-    if (method !== "POST") return methodNotAllowed(method)
-    return indexDebug(env, request)
   }
   if (path === "api/mod-records/clear") {
     if (method !== "POST") return methodNotAllowed(method)
