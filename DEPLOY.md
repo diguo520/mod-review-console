@@ -65,8 +65,8 @@ npx wrangler d1 execute mod-review-console-db --remote --file=schema.sql   # 线
 
 ### 1.3 把库绑到 Pages 项目
 
-`wrangler.toml` 里已经写好 D1 绑定，本地 `wrangler pages dev` 直接生效；
-线上还要在 Pages 项目里配一份（两边指向同一个库）：
+绑定写在仓库根的 `wrangler.toml` 里（`binding = "DB"`），本地 `wrangler pages dev` 直接生效。
+线上再在控制台配一份、两边指向同一个库，最不容易出错：
 
 Pages 项目 → **Settings** → **Functions** → **D1 database bindings**，变量名填 **`DB`**，
 库选上面那个。
@@ -119,18 +119,35 @@ git remote add origin <你的仓库地址> && git push -u origin main
 
 ### 2.3 环境变量与密钥(「管理员账号/密码」就配在这)
 
-Pages 项目 → **Settings** → **Variables and secrets**(旧版叫 Environment variables) →
-Production(建议 Preview 也加一份)。
+**先说一个实测踩到的坑：仓库里一旦有 `wrangler.toml`，它就是这个项目的配置事实来源 ——
+普通变量以文件里的 `[vars]` 为准，控制台/API 手写的同名普通变量会在下一次构建时被覆盖。**
+所以本项目把普通变量写进 `wrangler.toml`，密钥仍然只能在控制台 / `wrangler` 里配
+（密钥不进仓库）。
 
-| 名称 | 类型 | 必填 | 示例 | 说明 |
+普通变量，改 `wrangler.toml`：
+
+```toml
+[vars]
+ADMIN_USER = "admin"
+SESSION_TTL_HOURS = "12"
+```
+
+密钥，二选一：
+
+- 控制台：Pages 项目 → **Settings** → **Variables and secrets**(旧版叫 Environment variables)
+  → 新增，类型选**密钥**；
+- 命令行：`npx wrangler pages secret put SESSION_SECRET --project-name=mod-review-console`
+  （从 stdin 读值，行尾别带多余换行）。
+
+| 名称 | 在哪配 | 必填 | 示例 | 说明 |
 | --- | --- | --- | --- | --- |
-| `ADMIN_USER` | 变量 | ✅ | `admin` | 管理员账号 |
+| `ADMIN_USER` | `wrangler.toml [vars]` | ✅ | `admin` | 管理员账号 |
+| `SESSION_TTL_HOURS` | `wrangler.toml [vars]` | ❌ | `12` | 登录有效期(小时)，默认 12 |
 | `ADMIN_PASSWORD` | 密钥 | 二选一 | `正确的马儿电池订书钉` | 明文密码 |
 | `ADMIN_PASSWORD_HASH` | 密钥 | 二选一(推荐) | 64 位小写十六进制 | 密码的 SHA-256，控制台不留明文 |
 | `SESSION_SECRET` | 密钥 | ✅ | 随机 32 字节以上 | 会话 Cookie 的 HMAC 签名密钥 |
-| `SESSION_TTL_HOURS` | 变量 | ❌ | `12` | 登录有效期(小时)，默认 12 |
 | `GITHUB_TOKEN` | 密钥 | 建议 | `github_pat_...` | 服务端调 GitHub 用；不配也能跑，但额度只有 60 次/小时 |
-| `NODE_VERSION` | 变量 | 建议 | `22` | 构建用 Node 版本 |
+| `NODE_VERSION` | 密钥/变量 | ❌ | `22` | 构建用 Node 版本；不配就用 Cloudflare 默认(实测能构建) |
 
 > 早期版本用过的 `PB_ORIGIN` / `PB_PROXY_SECRET` / `CF_ACCESS_CLIENT_ID` /
 > `CF_ACCESS_CLIENT_SECRET` 已经**不再需要**（那是 PocketBase + Cloudflare Tunnel 时代的
@@ -347,3 +364,17 @@ SESSION_SECRET="dev-only-secret-at-least-32-chars-long"
 - `mod-inspect/tick` → `checked=2 offline=1 undetermined=0`，且只写确定结果
 - `mod-records/clear` 分范围计数正确；`scopes=[]` → 400；`scopes=["../x"]` → 400
 - TypeScript 单文件 `tsc --strict` → 0 错误
+- **变量管理踩坑（重要）**：仓库里加入 `wrangler.toml` 之后，这个项目就以文件为准 ——
+  控制台/API 写进去的**普通变量会在下一次构建时被清掉**（症状：登录返回 500
+  `session_secret_missing`）。现已改成：普通变量进 `[vars]`，密钥用
+  `wrangler pages secret put`（可在控制台核对类型是「密钥」）。
+
+线上实测(部署完成、**本机 PocketBase 与 cloudflared 全部停掉之后**再打一遍):
+
+- 登录 200；`mod-sync/state` 200 且 `sources=4` / `mods=4`；四张表全部 200
+- 写入 / 列出 / 删除自检数据正常，验证完已清空
+- `mod-inspect/tick` 真调 GitHub；撞到未认证限流时如实回报 `rateLimited=true` /
+  `undetermined=1`，**没有**把限流误写成「仓库失联」
+- 浏览器端到端(无头 Chromium + CDP，**21 条断言全过**)：登录门、9 类筛选计数、
+  批量操作台、已上架条目删除被拦住且给出原因、页面零 JS 运行时错误
+- 旧链路已死：本机进程停掉后 `pb.5318.cm` 变 403，而站点数据照常 —— 机器依赖确实去掉
