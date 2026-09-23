@@ -139,6 +139,15 @@ git remote add origin <你的仓库地址> && git push -u origin main
 
 `functions/` 会被自动识别成 Pages Functions，不需要额外配置。
 
+> ⚠️ **踩坑记录：项目已经用 `wrangler pages deploy` 直传过，再想接 Git 会「拉取仓库失败」。**
+> Pages 项目的 `source` 分 *Direct Upload* 与 *Connect to Git* 两种，**创建后不可互改** ——
+> 直传项目调 API 改源会直接回 `You cannot update the source object in a Direct Uploads project`，
+> 控制台里也没有这个入口。唯一的办法是：删掉直传项目 → 用**同名** + Connect to Git 重建 →
+> 重配环境变量 → 重新挂自定义域。同名重建后 `xxx.pages.dev` 子域不变，DNS 里指向它的 CNAME
+> 不用动，所以中断时间就是一次构建（约 1~2 分钟）。
+>
+> 另：Git 集成项目创建后不会自动跑第一次构建，要在 Deployments 里触发一次，或随便推一次提交。
+
 > 仓库 `pnpm-workspace.yaml` 里的放行清单 **不是可选项**。本项目的依赖里有 5 个包带可选
 > install 脚本(`@parcel/watcher`、`@swc/core`、`core-js`、`less`、`protobufjs`)，pnpm 默认
 > 忽略它们的脚本并以 `ERR_PNPM_IGNORED_BUILDS` **退出码 1** 结束 install。Cloudflare 的 install

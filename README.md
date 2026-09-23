@@ -24,6 +24,16 @@
 - **审核记录 / 处置记录**：完整流水，含操作人与理由，可清空本机记录。
 - **导出审核结果**：导出后在**本机**重建并签名索引仓库，改动才真正生效。
 
+## 线上部署
+
+- **生产站点**：<https://mod.5318.cm>（Cloudflare Pages 项目 `mod-review-console`）
+- **来源**：GitHub `diguo520/mod-review-console` 的 `main` 分支，Cloudflare 侧执行
+  `pnpm build` → 产物目录 `dist`，`functions/` 自动打包成 Pages Functions。
+- **推送到 `main` 即自动构建上线**，不需要手动跑 `wrangler pages deploy`。
+- **管理员账号密码不写在仓库里**，放在 Pages 项目 → Settings → Variables and secrets；
+  改完必须重新部署才生效。
+- 页面数据来自 PocketBase（经 Cloudflare Tunnel 暴露），**那台机器必须开着**，详见 `DEPLOY.md`。
+
 ## 架构
 
 ```

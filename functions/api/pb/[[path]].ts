@@ -180,6 +180,16 @@ export async function onRequest(context: FunctionContext): Promise<Response> {
 
   const responseHeaders = new Headers(upstream.headers)
   for (let i = 0; i < HOP_BY_HOP_HEADERS.length; i += 1) responseHeaders.delete(HOP_BY_HOP_HEADERS[i])
+
+  // PocketBase 会给读接口发 Cache-Control: max-age=14400，浏览器会照此把审核数据缓存 4 小时。
+  // 表现为「刚收录/删除的条目页面上还是旧样子」；更糟的是 PB 关机时页面会继续显示陈旧数据
+  // 而不是报错。审核台的数据每一条都可能是刚改的，所以统一改写成 no-store，并丢掉会引起
+  // 条件缓存(304)的校验头，保证每次读到的都是实时值。
+  responseHeaders.delete("age")
+  responseHeaders.delete("etag")
+  responseHeaders.delete("last-modified")
+  responseHeaders.set("Cache-Control", "no-store")
+
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
