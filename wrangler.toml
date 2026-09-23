@@ -11,7 +11,7 @@ pages_build_output_dir = "dist"
 [vars]
 # 管理员账号。密码不在这里：用 ADMIN_PASSWORD_HASH(推荐) 或 ADMIN_PASSWORD，
 # 两者都是密钥，见文件头说明。
-ADMIN_USER = "admin"
+ADMIN_USER = "diguo520"
 # 登录有效期(小时)，留空则默认 12
 SESSION_TTL_HOURS = "12"
 

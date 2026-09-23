@@ -89,7 +89,7 @@ pnpm lint
    | Root directory | 留空 |
 
 4. 环境变量（**管理员账号/密码就配在这里**）见 `DEPLOY.md` 2.3 节；最少要配
-   `PB_ORIGIN`、`ADMIN_USER`、`ADMIN_PASSWORD`（或 `ADMIN_PASSWORD_HASH`）、`SESSION_SECRET`，
+   `ADMIN_USER`、`ADMIN_PASSWORD`（或 `ADMIN_PASSWORD_HASH`）、`SESSION_SECRET`，
    再加 `NODE_VERSION=22`。
 5. `functions/` 会被自动识别成 Pages Functions，无需额外配置。
 

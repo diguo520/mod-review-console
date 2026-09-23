@@ -128,7 +128,7 @@ git remote add origin <你的仓库地址> && git push -u origin main
 
 ```toml
 [vars]
-ADMIN_USER = "admin"
+ADMIN_USER = "diguo520"
 SESSION_TTL_HOURS = "12"
 ```
 
@@ -141,7 +141,7 @@ SESSION_TTL_HOURS = "12"
 
 | 名称 | 在哪配 | 必填 | 示例 | 说明 |
 | --- | --- | --- | --- | --- |
-| `ADMIN_USER` | `wrangler.toml [vars]` | ✅ | `admin` | 管理员账号 |
+| `ADMIN_USER` | `wrangler.toml [vars]` | ✅ | `diguo520` | 管理员账号 |
 | `SESSION_TTL_HOURS` | `wrangler.toml [vars]` | ❌ | `12` | 登录有效期(小时)，默认 12 |
 | `ADMIN_PASSWORD` | 密钥 | 二选一 | `正确的马儿电池订书钉` | 明文密码 |
 | `ADMIN_PASSWORD_HASH` | 密钥 | 二选一(推荐) | 64 位小写十六进制 | 密码的 SHA-256，控制台不留明文 |
@@ -229,7 +229,7 @@ npx wrangler pages dev dist
 项目根建 `.dev.vars`(**已在 `.gitignore`，别提交**)。本地跑只需要会话相关的三个变量：
 
 ```
-ADMIN_USER="admin"
+ADMIN_USER="diguo520"
 ADMIN_PASSWORD="dev-only-password"
 SESSION_SECRET="dev-only-secret-at-least-32-chars-long"
 ```
