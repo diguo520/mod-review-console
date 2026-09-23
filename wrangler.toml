@@ -1,11 +1,19 @@
 # Cloudflare Pages 项目配置。
 #
-# 本地跑 wrangler pages dev 时靠它拿到 DB 绑定；线上 Git 构建也会读取本文件，
-# 但**线上真正生效的绑定以 Pages 项目设置里的那份为准**（部署脚本会同时写一份，
-# 两边指向同一个 D1，避免出现「本地能跑、线上 DB 未定义」）。
+# ⚠️ 本文件是**变量与绑定的唯一事实来源**：一旦仓库里有 wrangler.toml，
+# Cloudflare 每次构建都会按它来配置部署，控制台/API 上手写的普通变量会被覆盖掉。
+# 所以普通变量写在下面 [vars]，**密钥不能写这里**（仓库是公开的），
+# 密钥用 `wrangler pages secret put` 或控制台 Variables and secrets 配。
 name = "mod-review-console"
 compatibility_date = "2026-09-23"
 pages_build_output_dir = "dist"
+
+[vars]
+# 管理员账号。密码不在这里：用 ADMIN_PASSWORD_HASH(推荐) 或 ADMIN_PASSWORD，
+# 两者都是密钥，见文件头说明。
+ADMIN_USER = "admin"
+# 登录有效期(小时)，留空则默认 12
+SESSION_TTL_HOURS = "12"
 
 [[d1_databases]]
 binding = "DB"
