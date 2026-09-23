@@ -146,7 +146,8 @@ SESSION_TTL_HOURS = "12"
 | `ADMIN_PASSWORD` | 密钥 | 二选一 | `正确的马儿电池订书钉` | 明文密码 |
 | `ADMIN_PASSWORD_HASH` | 密钥 | 二选一(推荐) | 64 位小写十六进制 | 密码的 SHA-256，控制台不留明文 |
 | `SESSION_SECRET` | 密钥 | ✅ | 随机 32 字节以上 | 会话 Cookie 的 HMAC 签名密钥 |
-| `GITHUB_TOKEN` | 密钥 | 建议 | `github_pat_...` | 服务端调 GitHub 用；不配也能跑，但额度只有 60 次/小时 |
+| `GITHUB_TOKEN` | 密钥 | 建议 | `github_pat_...` | 服务端调 GitHub 用；不配也能跑，但额度只有 60 次/小时。**要自动上架则需 Contents: Read and write** |
+| `INDEX_SYNC_TOKEN` | 密钥 | ❌ | 随机 32 字节 | 外部定时任务调 `POST /api/pb/api/index/sync` 用的共享令牌，只对该端点生效 |
 | `NODE_VERSION` | 密钥/变量 | ❌ | `22` | 构建用 Node 版本；不配就用 Cloudflare 默认(实测能构建) |
 
 > 早期版本用过的 `PB_ORIGIN` / `PB_PROXY_SECRET` / `CF_ACCESS_CLIENT_ID` /

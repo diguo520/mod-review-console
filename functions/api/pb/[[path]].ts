@@ -32,6 +32,7 @@ type Env = {
   DB?: D1DatabaseLike
   SESSION_SECRET?: string
   GITHUB_TOKEN?: string
+  INDEX_SYNC_TOKEN?: string
 }
 
 type FunctionContext = {
@@ -667,15 +668,356 @@ async function clearRecords(db: D1DatabaseLike, request: Request): Promise<Respo
   return jsonResponse(200, { ok: true, removed: { local: local, checks: checks } })
 }
 
+/**
+ * 外部调度（GitHub Actions 定时任务等）用的共享令牌校验。
+ * 没配 INDEX_SYNC_TOKEN 时恒为 false —— 「没配就等于关着」，不会意外放开写权限。
+ */
+async function indexSyncTokenOk(env: Env, request: Request): Promise<boolean> {
+  const expected = String(env.INDEX_SYNC_TOKEN || "")
+  if (!expected) return false
+  const provided = String(request.headers.get("x-index-sync-token") || "")
+  if (!provided) return false
+  return constantTimeEqual(provided, expected)
+}
+// —— 审核结论同步进索引仓库 ——
+//
+// 零机器依赖的最后一环：以前「把审核结论写回索引仓库」要维护者在本机跑
+// scripts/moderate.mjs + scripts/build-index.mjs 再 push。现在前半段（改写数据文件）
+// 搬到这里，后半段（重建 + Ed25519 签名）由索引仓库自己的 GitHub Actions 完成，
+// 私钥存在 Actions Secret 里 —— 维护者电脑全程不用开机。
+//
+// 语义与 scripts/moderate.mjs 严格对齐：
+//   approve 收录通过 → 加进 sources.json，并撤销该来源的审核记录
+//   reject  拒绝收录 → 写 moderation.json；来源级拒绝同时从 sources.json 移除
+//   delist  下架     → 只写 moderation.json（条目留在索引里并标记 delisted）
+//   restore 撤销     → 从 moderation.json 删掉该条记录
+//
+// 只重放「还没同步过」的决定（applied = 0）。不做整体重放：sources.json 是外部事实，
+// 作者的提交本来就是以 PR 形式直接改进来的，整体重放会把没有 approve 决定的来源整片删掉。
+
+const GITHUB_API = "https://api.github.com"
+const INDEX_SOURCES_FILE = "sources.json"
+const INDEX_MODERATION_FILE = "moderation.json"
+
+type DecisionRow = {
+  id?: unknown
+  target?: unknown
+  kind?: unknown
+  action?: unknown
+  reason_zh?: unknown
+  reason_en?: unknown
+  operator?: unknown
+  decided_at?: unknown
+}
+
+type ModerationEntry = {
+  target: string
+  kind: string
+  action: string
+  reason: { zh: string; en: string }
+  at: string
+  by: string
+}
+
+type RepoFile = { ok: boolean; status: number; sha: string; json: Record<string, unknown> | null }
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** 索引仓库文件都是 UTF-8（moderation.json 里有中文），atob 出来是二进制串，必须再过一遍 TextDecoder */
+function b64ToText(value: string): string {
+  const binary = atob(value.replace(/\s+/g, ""))
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return new TextDecoder().decode(bytes)
+}
+
+/** (target, kind) 唯一决定一条审核记录，大小写不敏感 —— 与 moderate.mjs 的去重口径一致 */
+function entryKey(target: string, kind: string): string {
+  return target.trim().toLowerCase() + "|" + kind
+}
+
+async function githubCall(
+  env: Env,
+  url: string,
+  method: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const headers: Record<string, string> = { ...githubHeaders(env, "application/vnd.github+json") }
+  if (body !== undefined) headers["Content-Type"] = "application/json"
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: method,
+        headers: headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      },
+      SYNC_TIMEOUT_MS,
+    )
+    const text = await res.text()
+    let data: unknown = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = null
+    }
+    return { ok: res.ok, status: res.status, data: data }
+  } catch {
+    return { ok: false, status: 0, data: null }
+  }
+}
+
+async function readIndexFile(env: Env, file: string): Promise<RepoFile> {
+  const url = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO + "/contents/" + file + "?ref=" + SYNC_BRANCH
+  const res = await githubCall(env, url, "GET")
+  if (!res.ok || !isPlainObject(res.data)) return { ok: false, status: res.status, sha: "", json: null }
+  const content = typeof res.data.content === "string" ? res.data.content : ""
+  let json: Record<string, unknown> | null = null
+  try {
+    const parsed: unknown = JSON.parse(b64ToText(content))
+    if (isPlainObject(parsed)) json = parsed
+  } catch {
+    json = null
+  }
+  return { ok: json !== null, status: res.status, sha: String(res.data.sha || ""), json: json }
+}
+
+/**
+ * 一次提交写多个文件（Git Data API）：blob → tree → commit → 移分支。
+ * 为什么不用 contents PUT 逐个文件写：拒绝收录要「同时」删来源 + 写审核理由，
+ * 分两次提交会出现「来源没了但理由还没发布」的中间态。原子提交不给这个窗口。
+ */
+async function commitIndexFiles(
+  env: Env,
+  files: Array<{ path: string; text: string }>,
+  message: string,
+): Promise<{ ok: boolean; status: number; commit: string }> {
+  const base = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO
+
+  const refRes = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
+  if (!refRes.ok || !isPlainObject(refRes.data) || !isPlainObject(refRes.data.object)) {
+    return { ok: false, status: refRes.status, commit: "" }
+  }
+  const headSha = String(refRes.data.object.sha || "")
+
+  const headRes = await githubCall(env, base + "/git/commits/" + headSha, "GET")
+  if (!headRes.ok || !isPlainObject(headRes.data)) return { ok: false, status: headRes.status, commit: "" }
+  const headTree = isPlainObject(headRes.data.tree) ? String(headRes.data.tree.sha || "") : ""
+
+  const tree: Array<{ path: string; mode: string; type: string; sha: string }> = []
+  for (let i = 0; i < files.length; i += 1) {
+    const blob = await githubCall(env, base + "/git/blobs", "POST", {
+      content: files[i].text,
+      encoding: "utf-8",
+    })
+    if (!blob.ok || !isPlainObject(blob.data)) return { ok: false, status: blob.status, commit: "" }
+    tree.push({ path: files[i].path, mode: "100644", type: "blob", sha: String(blob.data.sha || "") })
+  }
+
+  const treeRes = await githubCall(env, base + "/git/trees", "POST", { base_tree: headTree, tree: tree })
+  if (!treeRes.ok || !isPlainObject(treeRes.data)) return { ok: false, status: treeRes.status, commit: "" }
+  const newTree = String(treeRes.data.sha || "")
+
+  const commitRes = await githubCall(env, base + "/git/commits", "POST", {
+    message: message,
+    tree: newTree,
+    parents: [headSha],
+  })
+  if (!commitRes.ok || !isPlainObject(commitRes.data)) return { ok: false, status: commitRes.status, commit: "" }
+  const newCommit = String(commitRes.data.sha || "")
+
+  const refUpdate = await githubCall(env, base + "/git/refs/heads/" + SYNC_BRANCH, "PATCH", {
+    sha: newCommit,
+    force: false,
+  })
+  if (!refUpdate.ok) return { ok: false, status: refUpdate.status, commit: "" }
+  return { ok: true, status: 200, commit: newCommit }
+}
+
+async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promise<Response> {
+  const raw = (await request.json().catch(() => ({}))) as { dryRun?: unknown }
+  const dryRun = raw.dryRun === true
+
+  if (!String(env.GITHUB_TOKEN || "")) {
+    return jsonResponse(500, {
+      error: "github_token_missing",
+      message: "部署缺少 GITHUB_TOKEN，无法写入索引仓库",
+    })
+  }
+
+  const rows = await db
+    .prepare('SELECT * FROM "mod_decisions" WHERE COALESCE(applied, 0) = 0 ORDER BY decided_at ASC, id ASC')
+    .all()
+  const decisions = (rows.results || []) as DecisionRow[]
+  if (decisions.length === 0) {
+    return jsonResponse(200, { ok: true, pending: 0, applied: 0, changed: [], notes: ["没有待同步的审核决定"] })
+  }
+
+  const sourcesFile = await readIndexFile(env, INDEX_SOURCES_FILE)
+  const moderationFile = await readIndexFile(env, INDEX_MODERATION_FILE)
+  if (!sourcesFile.ok || !moderationFile.ok) {
+    return jsonResponse(502, {
+      error: "index_file_unreadable",
+      message: "读不到索引仓库的 sources.json / moderation.json",
+      detail: { sources: sourcesFile.status, moderation: moderationFile.status },
+    })
+  }
+
+  const sourcesData = sourcesFile.json as Record<string, unknown>
+  const moderationData = moderationFile.json as Record<string, unknown>
+
+  let list: string[] = Array.isArray(sourcesData.sources)
+    ? sourcesData.sources
+        .filter((x: unknown): x is string => typeof x === "string")
+        .map((x: string) => x.trim())
+        .filter((x: string) => x.length > 0)
+    : []
+
+  let entries: ModerationEntry[] = []
+  if (Array.isArray(moderationData.entries)) {
+    for (const item of moderationData.entries) {
+      if (!isPlainObject(item) || typeof item.target !== "string") continue
+      const reason = isPlainObject(item.reason) ? item.reason : {}
+      entries.push({
+        target: item.target,
+        kind: typeof item.kind === "string" && item.kind ? item.kind : "id",
+        action: typeof item.action === "string" ? item.action : "",
+        reason: {
+          zh: typeof reason.zh === "string" ? reason.zh : "",
+          en: typeof reason.en === "string" ? reason.en : "",
+        },
+        at: typeof item.at === "string" ? item.at : "",
+        by: typeof item.by === "string" ? item.by : "",
+      })
+    }
+  }
+
+  const notes: string[] = []
+  const appliedIds: string[] = []
+  let lastAt = ""
+
+  for (let i = 0; i < decisions.length; i += 1) {
+    const d = decisions[i]
+    const target = String(d.target === undefined ? "" : d.target).trim()
+    const action = String(d.action === undefined ? "" : d.action).trim()
+    if (!target || !action) {
+      notes.push("跳过无效决定 id=" + String(d.id === undefined ? "?" : d.id))
+      continue
+    }
+    const rawKind = String(d.kind === undefined ? "" : d.kind)
+    const kind = rawKind === "source" || rawKind === "id" ? rawKind : target.includes("/") ? "source" : "id"
+    const at = String(d.decided_at === undefined ? "" : d.decided_at) || new Date().toISOString()
+    const by = String(d.operator === undefined ? "" : d.operator) || "diguo520"
+    const key = entryKey(target, kind)
+
+    if (action === "approve") {
+      if (!list.some((x) => x.toLowerCase() === target.toLowerCase())) list.push(target)
+      entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
+    } else if (action === "reject" || action === "delist") {
+      const zh =
+        String(d.reason_zh === undefined ? "" : d.reason_zh).trim() ||
+        (action === "reject" ? "不符合收录要求" : "已下架")
+      const en = String(d.reason_en === undefined ? "" : d.reason_en).trim() || zh
+      entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
+      entries.push({ target: target, kind: kind, action: action, reason: { zh: zh, en: en }, at: at, by: by })
+      if (action === "reject" && kind === "source") {
+        const before = list.length
+        list = list.filter((x) => x.toLowerCase() !== target.toLowerCase())
+        if (list.length !== before) notes.push("已从 sources.json 移除被拒绝的来源 " + target)
+      }
+    } else if (action === "restore") {
+      entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
+    } else {
+      notes.push("未知动作「" + action + "」（target=" + target + "），已跳过")
+      continue
+    }
+
+    if (at > lastAt) lastAt = at
+    appliedIds.push(String(d.id === undefined ? "" : d.id))
+  }
+
+  // 序列化口径与 scripts/moderate.mjs 一致：2 空格缩进 + 结尾换行，diff 才不会整片翻红
+  const newSources: Record<string, unknown> = { ...sourcesData, schemaVersion: 1, sources: list }
+  const newModeration: Record<string, unknown> = {
+    ...moderationData,
+    schemaVersion: 1,
+    updatedAt: lastAt || new Date().toISOString(),
+    entries: entries,
+  }
+
+  const changed: string[] = []
+  if (JSON.stringify(newSources) !== JSON.stringify(sourcesData)) changed.push(INDEX_SOURCES_FILE)
+  if (JSON.stringify(newModeration) !== JSON.stringify(moderationData)) changed.push(INDEX_MODERATION_FILE)
+
+  if (dryRun) {
+    return jsonResponse(200, {
+      ok: true,
+      dryRun: true,
+      pending: decisions.length,
+      wouldApply: appliedIds.length,
+      changed: changed,
+      notes: notes,
+    })
+  }
+
+  let commit = ""
+  if (changed.length > 0) {
+    const files: Array<{ path: string; text: string }> = []
+    for (const name of changed) {
+      const value = name === INDEX_SOURCES_FILE ? newSources : newModeration
+      files.push({ path: name, text: JSON.stringify(value, null, 2) + "\n" })
+    }
+    const written = await commitIndexFiles(
+      env,
+      files,
+      "chore(index): 审核结论同步（" + appliedIds.length + " 条决定：" + changed.join("、") + "）",
+    )
+    if (!written.ok) {
+      return jsonResponse(502, {
+        error: "index_commit_failed",
+        message: "写入索引仓库失败（HTTP " + written.status + "），决定保持未同步，下次会重试",
+        changed: changed,
+      })
+    }
+    commit = written.commit
+  } else {
+    notes.push("索引仓库数据与决定一致，无需提交")
+  }
+
+  // 先提交再标记：中途失败时决定仍是 applied=0，下次重放一遍即可（重放幂等）
+  const stamp = new Date().toISOString()
+  for (const id of appliedIds) {
+    if (!id) continue
+    await db.prepare('UPDATE "mod_decisions" SET applied = 1, updated = ? WHERE id = ?').bind(stamp, id).run()
+  }
+
+  return jsonResponse(200, {
+    ok: true,
+    pending: decisions.length,
+    applied: appliedIds.length,
+    changed: changed,
+    commit: commit,
+    notes: notes,
+  })
+}
+
 // —— 路由 ——
 
 export async function onRequest(context: FunctionContext): Promise<Response> {
   const { request, env, params } = context
 
-  // 鉴权先于一切：Worker 只认自己的管理员会话 Cookie，
-  // 未登录一律 401（顺带也不会泄漏「有没有配 DB / GITHUB_TOKEN」这类部署状态）。
+  // 鉴权先于一切：Worker 只认自己的管理员会话 Cookie（定时/外部调度可用共享令牌，
+  // 且只对 api/index/sync 生效），其余情况一律 401 —— 顺带也不会泄漏
+  // 「有没有配 DB / GITHUB_TOKEN」这类部署状态。
+  const earlyPath = (Array.isArray(params.path) ? params.path : params.path ? [params.path] : [])
+    .join("/")
+    .replace(/^\/+|\/+$/g, "")
+
   const userId = await sessionUserId(env, readCookie(request, COOKIE_NAME))
-  if (!userId) {
+  const schedulerOk = earlyPath === "api/index/sync" && (await indexSyncTokenOk(env, request))
+  if (!userId && !schedulerOk) {
     return jsonResponse(401, { error: "admin_login_required", message: "请先登录管理员账号" })
   }
 
@@ -703,6 +1045,10 @@ export async function onRequest(context: FunctionContext): Promise<Response> {
   if (path === "api/mod-inspect/tick") {
     if (method !== "POST") return methodNotAllowed(method)
     return inspectTick(env, db, request)
+  }
+  if (path === "api/index/sync") {
+    if (method !== "POST") return methodNotAllowed(method)
+    return indexSync(env, db, request)
   }
   if (path === "api/mod-records/clear") {
     if (method !== "POST") return methodNotAllowed(method)

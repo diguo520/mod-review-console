@@ -1442,7 +1442,7 @@ export function useHome() {
    * 单条审核、批量操作、无人值守自动收录、批量清理失联都走这一条路径，
    * 免得几处各写一遍，规则慢慢走偏。
    */
-  const applyAction = useCallback(
+  const applyActionInner = useCallback(
     async (
       item: QueueItem,
       action: DecisionAction,
@@ -1491,6 +1491,35 @@ export function useHome() {
       applyLocalDecision(item, action, reasonText)
     },
     [applyLocalDecision, decisionIdByTarget, submitDecision, writeDeleteRecord, writeReviewRecord],
+  )
+  /**
+   * 审核结论同步进索引仓库。索引仓库收到提交后由它自己的 GitHub Actions 重建 + 签名，
+   * 于是整条「审核 → 上架」链路都不再需要维护者本机参与。
+   * 短时间内多次动作只发一次，免得批量操作打出一串并发提交互相抢分支。
+   */
+  const indexSyncTimerRef = useRef<number | null>(null)
+  const scheduleIndexSync = useCallback(() => {
+    if (indexSyncTimerRef.current !== null) return
+    indexSyncTimerRef.current = window.setTimeout(() => {
+      indexSyncTimerRef.current = null
+      void apiSend("/api/index/sync", "POST", {}).catch(() => {
+        // 同步失败不回滚审核结果：决定会保持「未同步」，下次动作或定时任务继续重试
+      })
+    }, 2500)
+  }, [])
+
+  /** 所有审核动作（单条 / 批量 / 无人值守自动收录 / 批量清理）都从这里过一遍，顺便触发同步 */
+  const applyAction = useCallback(
+    async (
+      item: QueueItem,
+      action: DecisionAction,
+      reasonText: string,
+      modeValue: "manual" | "auto",
+    ) => {
+      await applyActionInner(item, action, reasonText, modeValue)
+      scheduleIndexSync()
+    },
+    [applyActionInner, scheduleIndexSync],
   )
 
   const approveItem = useCallback(

@@ -22,7 +22,9 @@
   「清空已选」。批量按**串行**执行以避免撞 GitHub 限流，不合规的条目会被**跳过并如实回报**
   成功 / 失败 / 跳过数量，不会静默丢弃。
 - **审核记录 / 处置记录**：完整流水，含操作人与理由，可清空本机记录。
-- **导出审核结果**：导出后在**本机**重建并签名索引仓库，改动才真正生效。
+- **自动上架（零机器依赖）**：审核结论（含无人值守自动收录）会自动同步进索引仓库的
+  `sources.json` / `moderation.json`，仓库自带的 GitHub Actions 随即**重建 + Ed25519 签名**并发布
+  `docs/mod-index.json` —— 整条「审核 → 上架」链路都不需要维护者本机参与。
 
 ## 线上部署
 
@@ -55,7 +57,8 @@
 - **数据库** Cloudflare **D1**：`schema.sql` 建表，`wrangler.toml` 里绑定为 `DB`。
 
 > 队列数据永远**只读自索引仓库**（`sources.json` 与 `docs/mod-index.json`）—— 仓库才是事实来源；
-> D1 里存的只是「还没导出生效」的审核流水、处置留档与仓库巡检结果。索引签名私钥始终只在维护者本机。
+> D1 里存的是审核流水、处置留档与仓库巡检结果；其中**尚未同步**的决定会由 Worker 回写进索引仓库，
+> 再由索引仓库的 Actions 用存在 Actions Secret 里的私钥签名发布。私钥从不出现在浏览器或本站点。
 >
 > ⚠️ 早期版本把后端放在维护者本机的 PocketBase（经 Cloudflare Tunnel 暴露），必须电脑开着才有数据；
 > 现已整体迁到 Pages Functions + D1，**不再依赖任何常开机器**，详见 `DEPLOY.md` 第 1 节。
@@ -118,13 +121,17 @@ pnpm lint
   5000 次/小时**；不配也能跑，只是更容易撞限流。
 - **绝不要**命名成 `VITE_GITHUB_TOKEN` —— Vite 会把 `VITE_` 前缀变量在构建时**内联进
   `dist/assets/*.js`**，等于把令牌明文发到公网。
+- 写回索引仓库也要用到它：`GITHUB_TOKEN` 需要对该仓库有 **Contents: Read and write**（改
+  `.github/workflows/*` 还需 **Workflows: Read and write**）。只读令牌下「同步」会如实报 403。
+- `INDEX_SYNC_TOKEN`（密钥，可选）：给外部定时任务用的共享令牌，请求头 `x-index-sync-token`，
+  且**只对** `POST /api/pb/api/index/sync` 生效；不配则该端点只认管理员会话。
 
 ## 安全要点
 
 - 所有 `/api/pb/**` 一律**先校验管理员会话**，未登录 401；Worker 只认自己签发的 Cookie，
   不存在「伪造身份头」这条路。
 - 建议给 Pages 站点再挂一段 **Cloudflare Access** 当第二道门。
-- D1 里只是暂存流水；定期导出并重建索引，才是把审核结论沉淀进仓库的正路。
+- 审核结论会自动回写索引仓库并触发重建签名；`applied = 0` 表示还没同步成功，会自动重试（重放幂等）。
 - 令牌与密钥只写在 Cloudflare 控制台和本地 `.dev.vars`（已在 `.gitignore`），**不进仓库**。
 
 ## 状态
