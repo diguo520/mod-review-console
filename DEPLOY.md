@@ -3,118 +3,76 @@
 从零上线 EveJS Mod 收录审核控制台（人工审核 + 无人值守），以及回答「GitHub 令牌、
 管理员账号、管理员密码到底配在哪」。
 
-## 0. 先看架构：哪些能上 Pages，哪些不能
+## 0. 架构：全部跑在 Cloudflare 上
 
-| 部分 | 位置 | 能否上 Cloudflare Pages |
+| 部分 | 位置 | 说明 |
 | --- | --- | --- |
-| 前端(React SPA, `dist/`) | 浏览器 | ✅ 正是 Pages 的职责 |
-| 登录 / 会话 | `functions/api/session.ts` | ✅ Pages Functions |
-| PocketBase 同源代理 | `functions/api/pb/[[path]].ts` | ✅ Pages Functions |
-| SPA 深链回退 | `functions/_middleware.ts` | ✅ Pages Functions |
-| 业务后端(`pb_hooks/*.pb.js`) | PocketBase | ❌ **不能** |
-
-PocketBase 是一个常驻进程 + 本地 SQLite 文件 + 启动时加载的 JS 钩子。Cloudflare Pages
-只提供「静态资源 + 无状态 Functions」，没有常驻进程、没有可写本地磁盘，所以后端必须另找
-一台机器。本文用「一台小 VPS + Cloudflare Tunnel」。
+| 前端(React SPA, `dist/`) | Cloudflare Pages | 静态站点 |
+| 登录 / 会话 | `functions/api/session.ts` | Pages Function，签发 HttpOnly Cookie |
+| 业务后端 | `functions/api/pb/[[path]].ts` | Pages Function |
+| 本地留档表 | Cloudflare **D1** | `schema.sql` 建表，绑定名 `DB` |
+| SPA 深链回退 | `functions/_middleware.ts` | Pages Function |
 
 ```
 浏览器
-  └─ https://mods.example.com  (Cloudflare Pages)
-       ├─ /                  → dist/index.html
-       ├─ /api/session       → Function: 账号密码登录, 签发 HttpOnly Cookie
-       └─ /api/pb/**         → Function: 校验会话 → 注入 x-rh-user-id → 转发
-            └─ https://pb.example.com  (Cloudflare Tunnel → 127.0.0.1:8090)
-                 └─ PocketBase + pb_hooks/*.pb.js → api.github.com (带 GITHUB_TOKEN)
+  └─ https://mods.example.com               (Cloudflare Pages)
+       ├─ /                    → dist/index.html (React SPA)
+       ├─ /api/session         → Function: 管理员账号密码登录, 签发 HttpOnly Cookie
+       └─ /api/pb/api/**       → Function: 校验会话 → 业务逻辑
+            ├─ 只读 → api.github.com / cdn.jsdelivr.net
+            │        · sources.json         收录来源清单
+            │        · docs/mod-index.json  已签名发布的索引(含 moderation)
+            └─ 读写 → D1 (review_records / delete_records / repo_checks / mod_decisions)
 
 维护者本机: 导出 moderation.json / sources.json → 重建并签名索引仓库 → 提交
 ```
 
-## 1. 部署后端: PocketBase
+> **队列数据永远来自仓库**：`docs/mod-index.json` 与 `sources.json` 才是事实来源，
+> Function 只读它们；D1 里存的只是「还没导出生效」的暂存流水。
+> 索引签名私钥始终只在维护者本机，不会进 Cloudflare。
 
-### 1.1 准备目录
+> ⚠️ 早期版本把业务后端放在维护者本机的 PocketBase 上（经 Cloudflare Tunnel 暴露），
+> 于是「电脑关机 = 后台没数据」。现在后端已整体迁到 Pages Functions + D1：
+> **不需要 VPS、不需要常开电脑、不再需要隧道**。
 
-```bash
-mkdir -p /opt/evejs-mod-review && cd /opt/evejs-mod-review
-# 到 https://github.com/pocketbase/pocketbase/releases 下载对应平台压缩包, 解压到当前目录
-git clone <你的仓库地址> repo && cp -r repo/pb_hooks ./pb_hooks
-```
+## 1. 部署后端: Cloudflare D1
 
-```
-/opt/evejs-mod-review/
-  pocketbase      ← 可执行文件
-  pb_hooks/       ← 仓库里的 9 个 .pb.js
-  pb_data/        ← 首次启动自动生成(SQLite), 记得备份
-```
+后端不再是常驻进程，而是「一个 Pages Function + 一个 D1 数据库」。
 
-钩子会自己建表(`mod_submissions` / `mod_decisions` / `review_records` / `delete_records` /
-`repo_checks`)，不需要手动迁移。
+### 1.1 建库
 
-### 1.2 启动
+控制台 → **Workers & Pages** → **D1** → **Create database**，名字随意（本文用
+`mod-review-console-db`）。建完把 **Database ID** 记下来。
+
+或者用 wrangler：
 
 ```bash
-./pocketbase serve --http=127.0.0.1:8090
+npx wrangler d1 create mod-review-console-db
 ```
 
-**只监听 127.0.0.1**。别用 `0.0.0.0`，也别直接开防火墙端口 —— `pb_hooks` 里用 `routerAdd`
-注册的接口默认是**公开**的(没有鉴权中间件)，裸奔等于把「删除审核记录」「清空数据库」交给
-全网。外网入口只走 1.4 的隧道。
+把输出的 `database_id` 填进仓库根的 `wrangler.toml`。
 
-### 1.3 环境变量(systemd)
+### 1.2 建表
 
-`/etc/systemd/system/evejs-mod-review.service`:
-
-```ini
-[Unit]
-Description=EveJS Mod Review PocketBase
-After=network-online.target
-
-[Service]
-Type=simple
-User=evejs
-WorkingDirectory=/opt/evejs-mod-review
-Environment=GITHUB_TOKEN=github_pat_xxxxxxxx
-Environment=PB_PROXY_SECRET=<和 Cloudflare 侧同一个随机串>
-ExecStart=/opt/evejs-mod-review/pocketbase serve --http=127.0.0.1:8090
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
+`schema.sql` 就是全部表结构（四张留档表 + 索引），本地与线上各执行一次：
 
 ```bash
-systemctl daemon-reload && systemctl enable --now evejs-mod-review
-journalctl -u evejs-mod-review -f
+npx wrangler d1 execute mod-review-console-db --local  --file=schema.sql   # 本地预演
+npx wrangler d1 execute mod-review-console-db --remote --file=schema.sql   # 线上
 ```
 
-| 变量 | 作用 | 不配的后果 |
-| --- | --- | --- |
-| `GITHUB_TOKEN` | `mod_source` / `mod_inspect` / `mod_sync` 调 GitHub API | 退回匿名请求: 额度 5000 次/小时 → 60 次/小时，巡检频繁撞限流 |
-| `PB_PROXY_SECRET` | 要求清空接口必须来自 Pages 代理 | 只要 PB 没暴露公网影响不大；暴露了就必须配 |
+改了表结构就重跑一次；脚本里全是 `CREATE TABLE IF NOT EXISTS`，可以反复执行。
 
-> 这两个读取入口是本次改造新增的。原先 `GITHUB_TOKEN` 只从 VibeX 沙箱的
-> `/workspace/app/project/vibex-capability-keys.json` 读，自建机器上该路径不存在会**静默**
-> 降级成匿名。现在改成优先读环境变量、读不到才回落该文件，老部署不受影响。
+### 1.3 把库绑到 Pages 项目
 
-### 1.4 给它一个 HTTPS 入口
+`wrangler.toml` 里已经写好 D1 绑定，本地 `wrangler pages dev` 直接生效；
+线上还要在 Pages 项目里配一份（两边指向同一个库）：
 
-```bash
-cloudflared tunnel login
-cloudflared tunnel create evejs-mod-review
-cloudflared tunnel route dns evejs-mod-review pb.example.com
-cloudflared tunnel run --url http://127.0.0.1:8090 evejs-mod-review
-```
+Pages 项目 → **Settings** → **Functions** → **D1 database bindings**，变量名填 **`DB`**，
+库选上面那个。
 
-⚠️ 隧道一开，`pb.example.com` 就是公网可访问的，等于把 1.2 说的公开接口送出去了。必须再上
-一道闸，二选一：
-
-- **推荐: Cloudflare Access(Zero Trust)**。给 `pb.example.com` 建 Access 应用，策略只允许
-  Service Token；然后在 Pages 配 `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`(见 2.3)，
-  代理会自动带服务令牌过闸，匿名请求一律被挡住。
-- 或者: 隧道指向本机 Caddy/nginx，由它校验 `X-Proxy-Secret` 请求头(值同 `PB_PROXY_SECRET`)，
-  不带该头一律 403。
+> 变量名必须是 `DB` —— 代码里读的是 `env.DB`。
+> 绑定名写错/没绑定时的表现是接口返回 500 `d1_missing`（配置类错误，不静默）。
 
 ## 2. 部署前端: Cloudflare Pages
 
@@ -157,9 +115,7 @@ git remote add origin <你的仓库地址> && git push -u origin main
 > (pnpm 9/10)两个键上 —— 同一件事的新旧写法，两个都保留以兼容不同 pnpm 大版本。
 >
 > ⚠️ **不要用 `.npmrc` 的 `dangerously-allow-all-builds`**：pnpm 11 已不识别它(实测
-> `pnpm config get dangerously-allow-all-builds` 返回 `undefined`)，写了等于没写。本项目
-> 曾因此把放行值留成脚手架的占位字符串 `set this to true or false`，结果**干净克隆下
-> `pnpm install --frozen-lockfile` 直接退出 1**。已修复，见文末「已实测验证」。
+> `pnpm config get dangerously-allow-all-builds` 返回 `undefined`)，写了等于没写。
 
 ### 2.3 环境变量与密钥(「管理员账号/密码」就配在这)
 
@@ -168,16 +124,17 @@ Production(建议 Preview 也加一份)。
 
 | 名称 | 类型 | 必填 | 示例 | 说明 |
 | --- | --- | --- | --- | --- |
-| `PB_ORIGIN` | 变量 | ✅ | `https://pb.example.com` | PocketBase 地址，结尾不要斜杠 |
 | `ADMIN_USER` | 变量 | ✅ | `admin` | 管理员账号 |
 | `ADMIN_PASSWORD` | 密钥 | 二选一 | `正确的马儿电池订书钉` | 明文密码 |
 | `ADMIN_PASSWORD_HASH` | 密钥 | 二选一(推荐) | 64 位小写十六进制 | 密码的 SHA-256，控制台不留明文 |
 | `SESSION_SECRET` | 密钥 | ✅ | 随机 32 字节以上 | 会话 Cookie 的 HMAC 签名密钥 |
 | `SESSION_TTL_HOURS` | 变量 | ❌ | `12` | 登录有效期(小时)，默认 12 |
-| `PB_PROXY_SECRET` | 密钥 | 建议 | 同 PocketBase 那份 | 随代理请求带给 PB，PB 侧校验 |
-| `CF_ACCESS_CLIENT_ID` | 变量 | 可选 | `xxxx.access` | PB 挂了 Cloudflare Access 时用 |
-| `CF_ACCESS_CLIENT_SECRET` | 密钥 | 可选 | `xxxx` | 同上，两个一起配 |
+| `GITHUB_TOKEN` | 密钥 | 建议 | `github_pat_...` | 服务端调 GitHub 用；不配也能跑，但额度只有 60 次/小时 |
 | `NODE_VERSION` | 变量 | 建议 | `22` | 构建用 Node 版本 |
+
+> 早期版本用过的 `PB_ORIGIN` / `PB_PROXY_SECRET` / `CF_ACCESS_CLIENT_ID` /
+> `CF_ACCESS_CLIENT_SECRET` 已经**不再需要**（那是 PocketBase + Cloudflare Tunnel 时代的
+> 配置）。留着不影响运行，代码不会读它们；想清干净就在控制台逐条删掉。
 
 生成 `ADMIN_PASSWORD_HASH`(两条等价，任选):
 
@@ -216,69 +173,52 @@ Pages 项目 → **Custom domains** → 加 `mods.example.com`，按提示加 DN
 
 ## 3. GitHub 令牌配在哪
 
-**结论: 配在 PocketBase 那台机器上，不要配在 Cloudflare Pages。**
+**结论: 配在 Cloudflare Pages 的环境变量里(`GITHUB_TOKEN`)，由服务端 Function 使用。**
 
-看调用方在哪: 读 `EVEjs-mods` 索引仓库、拉 `sources.json` / `docs/mod-index.json`、探
-`evejs-mod.json` 清单的代码全在 `pb_hooks/*.pb.js` 里，是 **PocketBase 服务端**发起的出站
-请求。Pages 只是静态站点 + 三个薄 Function，全程不碰 GitHub。
+队列同步、来源体检、仓库巡检都是 Pages Function 出站调 `api.github.com`；令牌放服务端，
+浏览器永远拿不到它 —— 放前端就是直接泄漏。
 
-三个坑:
-
-1. **绝不要用 `VITE_GITHUB_TOKEN` 这类名字。** Vite 会把 `VITE_` 前缀的变量在构建时**内联进
-   `dist/assets/*.js`**，等于把令牌明文发到公网。本项目没有任何 `VITE_*` 密钥，唯一的
-   `VITE_PB_URL` 只是地址，且默认不需要配。
-2. **别让前端拿令牌去调 GitHub。** 那必然要把令牌下发到浏览器，属于直接泄漏。
-3. **也别配成 Pages 的普通环境变量。** 它不会出现在浏览器里(这点对)，但 PocketBase 读不到，
-   等于白配一个没用上的变量。
+**不配也能跑**：GitHub 未认证请求按出口 IP 限流约 60 次/小时，只是巡检更容易撞限流
+（表现为「官方接口本小时调用次数已用完」，稍后自动重试，**不会**误判成仓库失联）。
+配上以后是 5000 次/小时。
 
 ### 3.1 建令牌
 
-GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate new token:
+GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate new token：
 
-- Repository access: 只勾 `diguo520/EVEjs-mods`(以及需要体检的来源仓库；若都是公开仓库，
-  也可选 `Public repositories (read-only)`)
-- Permissions: **Repository permissions → Contents: Read-only**(其余全留 No access)
-- Expiration: 按轮换习惯，建议 90 天
-
-公开仓库不带令牌也能读；令牌的唯一作用是**把额度从 60 次/小时提到 5000 次/小时**(`mod_source`
-/ `mod_inspect` / `mod_sync` 三个钩子里都有这句注释)。所以给到 Contents 只读就够，别给写权限。
+- Repository access：只勾需要的（读公开来源仓库选 `Public Repositories` 即可）
+- Permissions：`Contents: Read-only`（`Metadata: Read-only` 细粒度令牌默认自带）
+- 想省事也可以用经典令牌，勾 `public_repo`
 
 ### 3.2 配上去
 
-按 1.3 写进 `Environment=GITHUB_TOKEN=...`，然后:
-
-```bash
-systemctl daemon-reload && systemctl restart evejs-mod-review
-```
-
-Docker 部署就是 `-e GITHUB_TOKEN=...` 或 `env_file`。
+Pages 项目 → **Settings** → **Variables and secrets** → 新增 `GITHUB_TOKEN`（类型选**密钥**）→
+**重新部署一次才生效**（Deployments → 最新一次 → Retry deployment，或推一次提交）。
 
 ### 3.3 确认生效
 
-- 工作台点一次「仓库巡检」，若返回里出现「官方接口本小时调用次数已用完」，说明令牌没被读到
-  (还在匿名 60 次/小时的档位)。
-- 也可在 PB 机器上直接验: `curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/rate_limit`，
-  看 `rate.limit` 是不是 5000。
+站点 → 工作台 → 点一次「仓库巡检」→ 不再出现额度不足提示。
+命令行也可以验：`curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/rate_limit`
+（`rate.limit` 应是 5000 而不是 60）。
 
 ## 4. 本地预演(建议上线前跑一次)
 
 ```bash
 pnpm build
+npx wrangler d1 execute mod-review-console-db --local --file=schema.sql
 npx wrangler pages dev dist
 ```
 
-项目根建 `.dev.vars`(**已在 `.gitignore`，别提交**):
+项目根建 `.dev.vars`(**已在 `.gitignore`，别提交**)。本地跑只需要会话相关的三个变量：
 
 ```
-PB_ORIGIN="http://127.0.0.1:8090"
 ADMIN_USER="admin"
 ADMIN_PASSWORD="dev-only-password"
 SESSION_SECRET="dev-only-secret-at-least-32-chars-long"
-PB_PROXY_SECRET="dev-only-proxy-secret"
 ```
 
-本机也起一个 PocketBase(`./pocketbase serve --http=127.0.0.1:8090`，`pb_hooks` 放同目录)。
-想直接连别的 PocketBase 而不走代理，就设 `VITE_PB_URL`(如 `http://127.0.0.1:8090`)再 `pnpm dev`。
+`wrangler.toml` 里的 D1 绑定在本地指向**本地库**(`.wrangler/state/...`)，不会碰到线上数据。
+想直连别的后端调试，可以设 `VITE_PB_URL`（如 `http://127.0.0.1:8090`）再 `pnpm dev`。
 
 ## 5. 上线验收清单
 
@@ -286,25 +226,29 @@ PB_PROXY_SECRET="dev-only-proxy-secret"
 - [ ] 故意输错 → 提示「账号或密码不正确」
 - [ ] 输对 → 进入工作台，右上角显示当前管理员
 - [ ] 直接访问 `/records` 并刷新 → 正常出页面而不是 404(SPA 回退生效)
-- [ ] 工作台能拉到索引仓库条目(`/api/pb` 代理 + PB 通了)
+- [ ] 工作台能拉到索引仓库条目(`/api/pb/api/mod-sync/state` 200，`sources` / `mods` 非空)
 - [ ] 点一次「仓库巡检」→ 不报额度不足(`GITHUB_TOKEN` 生效)
-- [ ] 记录中心「清空本机记录」→ 成功(`x-rh-user-id` 注入生效)
-- [ ] 未登录直接请求 `/api/pb/api/mod_decisions` → 401(代理没放行匿名请求)
+- [ ] 记录中心「清空本机记录」→ 成功，且回报的删除条数与实际相符
+- [ ] 未登录直接请求 `/api/pb/api/mod_decisions` → 401
 - [ ] 退出登录 → 回到登录表单
+- [ ] 换一台机器/关掉本机一切进程后再访问 → 数据照常(D1 生效的证明)
 
 ## 6. 安全清单
 
-- PocketBase **只监听 127.0.0.1**；公网入口必须挂 Cloudflare Access 或反代校验 `X-Proxy-Secret`。
-- `SESSION_SECRET` 用真随机，别用一串有意义的字符。
+- 所有 `/api/pb/**` 一律**先校验管理员会话**，未登录 401；没有会话就拿不到任何数据。
+- Worker 只认自己签发的会话 Cookie —— 没有「伪造身份头」这条路
+  (老 PocketBase 方案要靠 `PB_PROXY_SECRET` + `x-rh-user-id` 互相确认，现在整条链路都不需要了)。
+- `SESSION_SECRET` 用真随机，别用一串有意义的字符；换掉它等于立刻踢掉所有会话。
 - 优先用 `ADMIN_PASSWORD_HASH` 而不是 `ADMIN_PASSWORD`。
 - 给 Pages 站点也开一段 **Cloudflare Access** 当第二道门 —— 登录页之外再加一层更省心。
-- `pb_data/` 定时备份(那是全部审核记录)。
-- 令牌/密钥只写在 Cloudflare 控制台与 systemd 里，不进仓库。
+- 令牌/密钥只写在 Cloudflare 控制台与本地 `.dev.vars`，`.dev.vars` 不进仓库。
+- D1 里只是暂存流水；定期导出并重建索引，才是把审核结论沉淀进仓库的正路。
+- 轮换在聊天/文档里出现过的凭据（例如账号级 Global API Key），改用作用域令牌。
 
 ## 7. 已知边界(本次没做的)
 
 - **AI 无人审核**: `src/lib/aigc.ts`、`src/lib/llm.ts` 调的是平台(RunningHub VibeX)的
-  `/api/aigc/*`、`/api/llm/*` 网关，这些路由不在本仓库，自建 PocketBase 上不存在。这两个模块
+  `/api/aigc/*`、`/api/llm/*` 网关，这些路由不在本仓库，本项目也没有这套路由。这两个模块
   以及 `CostConfirmDialog`、`RhAccountMenu`、`useCostConfirm` 目前**没有被任何页面引用**，
   所以不影响现有功能；以后要接入得自己补一套 `/api/llm/*`(换任意一家 LLM API)。
 - `src/lib/rhLogin.ts`(RunningHub SSO) **保留未删**。要部署回 RunningHub 平台时，把
@@ -374,3 +318,32 @@ PB_PROXY_SECRET="dev-only-proxy-secret"
 - `.npmrc` —— 放行可选 install 脚本，避免 CI install 退出码 1
 - `.gitignore` —— 忽略 `.dev.vars` / `.wrangler`
 - `index.html` —— 补上页面标题
+
+## 10. D1 化改造(2026-09-24)
+
+把后端从「维护者本机 PocketBase + Cloudflare Tunnel」整体搬到「Pages Functions + D1」，
+目的：站点不再依赖任何一台常开机器。
+
+改动:
+
+- 新增 `schema.sql`(四张留档表 + 索引)与 `wrangler.toml`(D1 绑定名 `DB`)。
+- `functions/api/pb/[[path]].ts` 从「转发代理」改写成真正的后端：`mod-sync/state`、
+  `mod-source/inspect`、`mod-inspect/tick`、`mod-records/clear`，以及四个 collection 的
+  CRUD。请求/响应格式与 pb_hooks 版逐字段对齐，**前端零改动**。
+- 不再需要 `PB_ORIGIN` / `PB_PROXY_SECRET` / `CF_ACCESS_*` / Cloudflare Tunnel；
+  `pb_hooks/*.pb.js` 保留在仓库外(本机 PocketBase 目录)仅供回滚参考。
+
+已实测(本地 `wrangler pages dev` + 本地 D1，出站打真实 GitHub):
+
+- 匿名请求 `/api/pb/api/*` → **401**；登录后 → 200
+- `mod-sync/state` 真实拉到 `sources=4` / `mods=4`，`warnings` 为空
+- 四张表 CRUD：创建(15 位 id) / 读 / 改 / 删 / 删后 404 / 重复删 404 全部正确
+- 过滤(`action`、`mod_id`、`target`、`kind`)与排序(`-created`、`-decided_at`、`-checked_at`)正确
+- 布尔字段 `alive` / `applied` 前后端都是真布尔，不是 0/1
+- `sort` 注入尝试(`sort=id;DROP TABLE repo_checks`)被白名单丢弃，表完好
+- `mod-source/inspect` 真调 GitHub：存在仓库 → `repoAlive=true` 且带 manifest；
+  不存在仓库 → `repoAlive=false` + 「仓库返回 404，来源已失联」；非法输入(`../etc/passwd`、
+  `bad`)被正则挡掉
+- `mod-inspect/tick` → `checked=2 offline=1 undetermined=0`，且只写确定结果
+- `mod-records/clear` 分范围计数正确；`scopes=[]` → 400；`scopes=["../x"]` → 400
+- TypeScript 单文件 `tsc --strict` → 0 错误

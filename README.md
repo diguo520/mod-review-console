@@ -32,7 +32,8 @@
 - **推送到 `main` 即自动构建上线**，不需要手动跑 `wrangler pages deploy`。
 - **管理员账号密码不写在仓库里**，放在 Pages 项目 → Settings → Variables and secrets；
   改完必须重新部署才生效。
-- 页面数据来自 PocketBase（经 Cloudflare Tunnel 暴露），**那台机器必须开着**，详见 `DEPLOY.md`。
+- **零机器依赖**：业务后端是 Pages Functions、数据存 Cloudflare D1 —— 不需要 VPS、
+  不需要常开电脑、不需要 Cloudflare Tunnel。
 
 ## 架构
 
@@ -41,18 +42,23 @@
   └─ https://<你的域名>            (Cloudflare Pages: 静态站点 + Functions)
        ├─ /                        → dist/index.html (React SPA)
        ├─ /api/session             → Function: 管理员账号密码登录, 签发 HttpOnly Cookie
-       └─ /api/pb/**               → Function: 校验会话 → 注入 x-rh-user-id → 转发
-            └─ https://pb.<域名>   (Cloudflare Tunnel → 127.0.0.1:8090)
-                 └─ PocketBase + pb_hooks/*.pb.js → api.github.com (带 GITHUB_TOKEN)
+       └─ /api/pb/api/**           → Function: 校验会话 → 业务逻辑
+            ├─ 只读 → api.github.com / cdn.jsdelivr.net
+            │        · sources.json         收录来源清单
+            │        · docs/mod-index.json  已签名发布的索引(含 moderation)
+            └─ 读写 → D1 (review_records / delete_records / repo_checks / mod_decisions)
 ```
 
 - **前端** `src/`：React + TypeScript + Vite + Tailwind。
-- **Pages Functions** `functions/`：`api/session.ts`（登录）、`api/pb/[[path]].ts`（同源代理）、
+- **Pages Functions** `functions/`：`api/session.ts`（登录）、`api/pb/[[path]].ts`（业务后端）、
   `_middleware.ts`（SPA 深链回退）、`_routes.json`。
-- **业务后端** `pb_hooks/*.pb.js`：跑在 PocketBase 上，负责读写索引仓库与 GitHub API。
+- **数据库** Cloudflare **D1**：`schema.sql` 建表，`wrangler.toml` 里绑定为 `DB`。
 
-> ⚠️ **PocketBase 不能部署到 Cloudflare Pages**（无常驻进程、无可写本地磁盘），
-> 必须放在一台 VPS 上，详见 `DEPLOY.md` 第 1 节。
+> 队列数据永远**只读自索引仓库**（`sources.json` 与 `docs/mod-index.json`）—— 仓库才是事实来源；
+> D1 里存的只是「还没导出生效」的审核流水、处置留档与仓库巡检结果。索引签名私钥始终只在维护者本机。
+>
+> ⚠️ 早期版本把后端放在维护者本机的 PocketBase（经 Cloudflare Tunnel 暴露），必须电脑开着才有数据；
+> 现已整体迁到 Pages Functions + D1，**不再依赖任何常开机器**，详见 `DEPLOY.md` 第 1 节。
 
 ## 本地开发
 
@@ -104,22 +110,22 @@ pnpm lint
 
 ## GitHub 令牌
 
-**配在 PocketBase 那台机器上，不要配在 Cloudflare Pages。** 读索引仓库、探 `evejs-mod.json`
-清单的代码都在 `pb_hooks/*.pb.js`，是 PocketBase 服务端发起的出站请求。
+**配在 Cloudflare Pages 的环境变量里（`GITHUB_TOKEN`），由服务端 Function 使用。**
+读索引仓库、探 `evejs-mod.json` 清单的代码都在 `functions/api/pb/[[path]].ts`，
+是 Pages Function 发起的出站请求 —— 浏览器全程拿不到令牌。
 
 - 用 **Fine-grained token**，权限只要 **Contents: Read-only**，作用是**把额度从 60 次/小时提到
-  5000 次/小时**。
+  5000 次/小时**；不配也能跑，只是更容易撞限流。
 - **绝不要**命名成 `VITE_GITHUB_TOKEN` —— Vite 会把 `VITE_` 前缀变量在构建时**内联进
   `dist/assets/*.js`**，等于把令牌明文发到公网。
 
 ## 安全要点
 
-- PocketBase **只监听 `127.0.0.1`**，公网入口走 Cloudflare Tunnel；`pb_hooks` 里用 `routerAdd`
-  注册的接口默认**无鉴权**，裸奔等于把「清空数据库」交给全网。
+- 所有 `/api/pb/**` 一律**先校验管理员会话**，未登录 401；Worker 只认自己签发的 Cookie，
+  不存在「伪造身份头」这条路。
 - 建议给 Pages 站点再挂一段 **Cloudflare Access** 当第二道门。
-- `pb_data/`（全部审核记录）记得定时备份。
-- 令牌与密钥只写在 Cloudflare 控制台和 systemd 里，**不进仓库**（`.dev.vars` 与 `.wrangler`
-  已在 `.gitignore`）。
+- D1 里只是暂存流水；定期导出并重建索引，才是把审核结论沉淀进仓库的正路。
+- 令牌与密钥只写在 Cloudflare 控制台和本地 `.dev.vars`（已在 `.gitignore`），**不进仓库**。
 
 ## 状态
 
