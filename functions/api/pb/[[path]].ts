@@ -1070,6 +1070,55 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
   })
 }
 
+/**
+ * 临时诊断端点：逐个跑提交链路上的单个动作，用来判断线上究竟卡在哪一步。
+ * 排查完必须删掉（见 README 的「自动上架」一节）。
+ */
+async function indexDebug(env: Env, request: Request): Promise<Response> {
+  const raw = (await request.json().catch(() => ({}))) as { step?: unknown; status?: unknown }
+  const step = String(raw.step === undefined ? "" : raw.step)
+  const base = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO
+  const out: Record<string, unknown> = { step: step, tokenPrefix: String(env.GITHUB_TOKEN || "").slice(0, 10) }
+
+  if (step === "echo") {
+    const status = Number(raw.status) || 200
+    return jsonResponse(status, { ok: true, echo: status })
+  }
+  if (step === "ref-read") {
+    const r = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
+    out.status = r.status
+    out.data = r.data
+  } else if (step === "blob-post") {
+    const r = await githubCall(env, base + "/git/blobs", "POST", { content: "{\"probe\":1}\n", encoding: "utf-8" })
+    out.status = r.status
+    out.data = r.data
+  } else if (step === "tree-post") {
+    const head = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
+    const headSha = isPlainObject(head.data) && isPlainObject(head.data.object) ? String(head.data.object.sha || "") : ""
+    const c = await githubCall(env, base + "/git/commits/" + headSha, "GET")
+    const treeSha = isPlainObject(c.data) && isPlainObject(c.data.tree) ? String(c.data.tree.sha || "") : ""
+    const r = await githubCall(env, base + "/git/trees", "POST", {
+      base_tree: treeSha,
+      tree: [{ path: "__probe__.tmp", mode: "100644", type: "blob", sha: "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" }],
+    })
+    out.status = r.status
+    out.data = r.data
+  } else if (step === "ref-patch-same") {
+    const head = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
+    const headSha = isPlainObject(head.data) && isPlainObject(head.data.object) ? String(head.data.object.sha || "") : ""
+    const r = await githubCall(env, base + "/git/refs/heads/" + SYNC_BRANCH, "PATCH", { sha: headSha, force: false })
+    out.status = r.status
+    out.data = r.data
+  } else if (step === "stringify") {
+    const f = await readIndexRepoFile(env, INDEX_MODERATION_FILE)
+    out.status = f.status
+    out.textLength = JSON.stringify(f.json, null, 2).length
+  } else {
+    return jsonResponse(400, { error: "unknown_step", step: step })
+  }
+  return jsonResponse(200, out)
+}
+
 // —— 路由 ——
 
 export async function onRequest(context: FunctionContext): Promise<Response> {
@@ -1116,6 +1165,10 @@ export async function onRequest(context: FunctionContext): Promise<Response> {
   if (path === "api/index/sync") {
     if (method !== "POST") return methodNotAllowed(method)
     return indexSync(env, db, request)
+  }
+  if (path === "api/index/debug") {
+    if (method !== "POST") return methodNotAllowed(method)
+    return indexDebug(env, request)
   }
   if (path === "api/mod-records/clear") {
     if (method !== "POST") return methodNotAllowed(method)
