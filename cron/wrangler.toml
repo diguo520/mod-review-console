@@ -1,0 +1,19 @@
+# 定时同步 Worker（不是 Pages 项目，是独立的 Cloudflare Worker）。
+#
+# 作用：每 10 分钟调一次站点的 POST /api/pb/api/index/sync，
+# 把 D1 里待同步的审核决定推到索引仓库 —— 审核结论的发布不再需要
+# 维护者开着电脑、也不需要有人打开控制台点一下。
+#
+# 部署：
+#   npx wrangler deploy --config cron/wrangler.toml
+#   npx wrangler secret put INDEX_SYNC_TOKEN --config cron/wrangler.toml
+name = "mod-review-index-cron"
+main = "src/index.js"
+compatibility_date = "2026-09-23"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+# 站点地址（不带结尾斜杠）；换成自定义域名时改这里
+SYNC_URL = "https://mod.5318.cm"

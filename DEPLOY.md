@@ -204,9 +204,23 @@ Pages 项目 → **Custom domains** → 加 `mods.example.com`，按提示加 DN
 
 GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate new token：
 
+只读够用的场景（队列同步 / 来源体检 / 仓库巡检）：
+
 - Repository access：只勾需要的（读公开来源仓库选 `Public Repositories` 即可）
 - Permissions：`Contents: Read-only`（`Metadata: Read-only` 细粒度令牌默认自带）
 - 想省事也可以用经典令牌，勾 `public_repo`
+
+**要让审核结论自动回写索引仓库（零机器依赖必需），还要加写权限：**
+
+| 项目 | 值 | 不配的后果 |
+| --- | --- | --- |
+| Repository access | 勾上 `diguo520/EVEjs-mods` | 只选 `Public repositories` 时读得到、写不了 |
+| Contents | **Read and write** | 同步报 `403 Resource not accessible by personal access token` |
+| Workflows | Read and write | 改不了 `.github/workflows/*`（见第 11.4 节的一行改动） |
+| Metadata | Read-only | GitHub 默认带着，不用管 |
+
+**改权限不用换令牌**：在令牌设置里直接编辑权限，令牌字符串不变，Cloudflare 里的
+`GITHUB_TOKEN` 密钥不用重配、也不用重新部署。
 
 ### 3.2 配上去
 

@@ -49,6 +49,10 @@
             │        · sources.json         收录来源清单
             │        · docs/mod-index.json  已签名发布的索引(含 moderation)
             └─ 读写 → D1 (review_records / delete_records / repo_checks / mod_decisions)
+                 └─ 审核结论回写索引仓库 → 仓库自己的 Actions 重建+签名 → docs/mod-index.json
+
+Cloudflare 定时任务 (cron/ 目录, 每 10 分钟)
+  └─ 调 POST /api/pb/api/index/sync → 同上；没人开页面也会同步
 ```
 
 - **前端** `src/`：React + TypeScript + Vite + Tailwind。
@@ -62,6 +66,42 @@
 >
 > ⚠️ 早期版本把后端放在维护者本机的 PocketBase（经 Cloudflare Tunnel 暴露），必须电脑开着才有数据；
 > 现已整体迁到 Pages Functions + D1，**不再依赖任何常开机器**，详见 `DEPLOY.md` 第 1 节。
+
+## 零机器依赖（无人值守发布）
+
+审核结论从「点一下」到「启动器可见」，全链路都不需要维护者的电脑：
+
+| 环节 | 跑在哪 | 依赖谁的机器 |
+| --- | --- | --- |
+| 队列数据（sources.json / mod-index.json） | 索引仓库，站点只读拉取 | 无 |
+| 审核流水 / 处置留档 / 巡检结果 | Cloudflare D1 | 无 |
+| 审核结论回写索引仓库 | Pages Function `POST /api/pb/api/index/sync` | 无 |
+| 索引重建 + 签名 | 索引仓库 GitHub Actions（私钥只在 Actions Secret 里） | 无 |
+| **定期触发上面那步** | **`cron/` 里的 Cloudflare 定时任务，每 10 分钟** | 无 |
+
+```
+前端动作（或定时任务）
+  → POST /api/pb/api/index/sync
+      · 取 mod_decisions 里 applied = 0 的决定，重放出 sources.json / moderation.json
+      · 一次提交同时写多个文件（blob → tree → commit → 移分支），不会出现
+        「来源删了但审核理由还没发布」的中间态
+      · 提交成功才把决定标成 applied = 1；失败就保持 0，下次重放（重放幂等）
+  → 索引仓库 Actions（sources.json / moderation.json 变更触发）
+      · 用 INDEX_SIGNING_KEY 签名 → 提交 docs/mod-index.json
+  → 启动器读取
+```
+
+定时任务 Worker 只需部署一次：
+
+```bash
+# 1. 部署（独立 Worker，不是 Pages 项目）
+npx wrangler deploy --config cron/wrangler.toml
+
+# 2. 把站点那把共享令牌写进去（值与 Pages 的 INDEX_SYNC_TOKEN 相同）
+npx wrangler secret put INDEX_SYNC_TOKEN --config cron/wrangler.toml
+```
+
+换域名记得同步改 `cron/wrangler.toml` 里的 `SYNC_URL`。验证方法见 `DEPLOY.md` 第 11 节。
 
 ## 本地开发
 
@@ -121,8 +161,21 @@ pnpm lint
   5000 次/小时**；不配也能跑，只是更容易撞限流。
 - **绝不要**命名成 `VITE_GITHUB_TOKEN` —— Vite 会把 `VITE_` 前缀变量在构建时**内联进
   `dist/assets/*.js`**，等于把令牌明文发到公网。
-- 写回索引仓库也要用到它：`GITHUB_TOKEN` 需要对该仓库有 **Contents: Read and write**（改
-  `.github/workflows/*` 还需 **Workflows: Read and write**）。只读令牌下「同步」会如实报 403。
+- **回写索引仓库要写权限**。Fine-grained token 必须同时满足：
+
+  | 项目 | 值 |
+  | --- | --- |
+  | Repository access | 勾上 `diguo520/EVEjs-mods`（只选 Public repositories 读得到、写不了） |
+  | Contents | **Read and write**（核心：不加就报 403 Resource not accessible） |
+  | Workflows | **Read and write**（只有要改 `.github/workflows/*` 时才需要） |
+  | Metadata | Read-only（GitHub 默认带着） |
+
+  改权限**不用换令牌**：在 GitHub 令牌设置里直接编辑权限，令牌字符串不变，
+  Cloudflare 上的 `secret` / `.dev.vars` 都不用重配。
+- 同步失败时接口回 **4xx 而不是 5xx**：Cloudflare 会把 Pages Functions 的 5xx 响应体换成
+  它自己的错误页（线上实测只剩空的 `text/plain`），失败原因会被整个吞掉。所以
+  `index_commit_failed` 按上游状态码回 403 / 404 / 409 / 424，响应体里带
+  `stage`（卡在哪一步）、`detail`（GitHub 原话）、`trace`（每一步的 HTTP 结果）。
 - `INDEX_SYNC_TOKEN`（密钥，可选）：给外部定时任务用的共享令牌，请求头 `x-index-sync-token`，
   且**只对** `POST /api/pb/api/index/sync` 生效；不配则该端点只认管理员会话。
 
@@ -140,6 +193,9 @@ pnpm lint
 - 登录门（真实 `functions/api/session.ts`）26 条断言全过；登录流程真实浏览器验收 23 条断言全过；
   筛选 / 单删 / 批量操作同样做过真实浏览器验收。详见 `DEPLOY.md` 第 8 节。
 - `eslint` 仍有 12 个**改动前就存在**的问题（清单见 `DEPLOY.md` 8 节），本次未新增。
+- 索引回写链路用本地假 GitHub 验过整套（blob→tree→commit→ref、409 抢分支自动重试、
+  403 时的 4xx 回传），8 条断言全过；线上实测返回 `403 令牌缺少 Contents: Read and write 权限`。
+- Cloudflare 定时任务（`cron/`）已部署，实测无人操作也能把待同步决定标记完成。
 - **已知边界**：`src/lib/aigc.ts`、`src/lib/llm.ts` 依赖平台（RunningHub VibeX）的 AI 网关，
   自建部署上不存在，这两个模块及 `RhAccountMenu` / `CostConfirmDialog` 当前未被任何页面引用；
   `src/lib/rhLogin.ts`（RH SSO）保留未删，要切回平台版只需改 `src/lib/auth.ts` 的导出。
