@@ -139,11 +139,18 @@ git remote add origin <你的仓库地址> && git push -u origin main
 
 `functions/` 会被自动识别成 Pages Functions，不需要额外配置。
 
-> 仓库 `.npmrc` 里的 `dangerously-allow-all-builds=true` **不是可选项**。本项目的依赖里有 5 个
-> 包带可选 install 脚本(`@parcel/watcher`、`@swc/core`、`core-js`、`less`、`protobufjs`)，
-> pnpm 默认忽略它们的脚本并以 `ERR_PNPM_IGNORED_BUILDS` **退出码 1** 结束 install。Cloudflare
-> 的 install 步骤不由构建命令控制，只能靠 `.npmrc` 放行，否则部署会在安装阶段直接失败
-> (本地已实测复现，见文末「已实测验证」)。
+> 仓库 `pnpm-workspace.yaml` 里的放行清单 **不是可选项**。本项目的依赖里有 5 个包带可选
+> install 脚本(`@parcel/watcher`、`@swc/core`、`core-js`、`less`、`protobufjs`)，pnpm 默认
+> 忽略它们的脚本并以 `ERR_PNPM_IGNORED_BUILDS` **退出码 1** 结束 install。Cloudflare 的 install
+> 步骤不由构建命令控制，只能在仓库里放行，否则部署会在安装阶段直接失败。
+>
+> 放行写在 `pnpm-workspace.yaml` 的 `allowBuilds`(pnpm 11+)与 `onlyBuiltDependencies`
+> (pnpm 9/10)两个键上 —— 同一件事的新旧写法，两个都保留以兼容不同 pnpm 大版本。
+>
+> ⚠️ **不要用 `.npmrc` 的 `dangerously-allow-all-builds`**：pnpm 11 已不识别它(实测
+> `pnpm config get dangerously-allow-all-builds` 返回 `undefined`)，写了等于没写。本项目
+> 曾因此把放行值留成脚手架的占位字符串 `set this to true or false`，结果**干净克隆下
+> `pnpm install --frozen-lockfile` 直接退出 1**。已修复，见文末「已实测验证」。
 
 ### 2.3 环境变量与密钥(「管理员账号/密码」就配在这)
 
@@ -303,7 +310,12 @@ PB_PROXY_SECRET="dev-only-proxy-secret"
 
 在本机对本次改动做过这些验证(2026-09-24):
 
-- `pnpm install --frozen-lockfile` → **退出码 0**(`.npmrc` 放行前是 1，即为 Cloudflare 构建失败根因)
+- **干净克隆验证**(`git clone` 到空目录后跑真实 CI 流程)：修复前 `pnpm install
+  --frozen-lockfile` 退出 **1**(`ERR_PNPM_IGNORED_BUILDS`)—— 根因是 `pnpm-workspace.yaml` 的
+  `allowBuilds` 值还留着脚手架占位字符串 `set this to true or false`，且 `.npmrc` 的
+  `dangerously-allow-all-builds` 在 pnpm 11 上不生效。改成布尔值并补上
+  `onlyBuiltDependencies` 后：`pnpm install --frozen-lockfile` → **退出码 0**，
+  `pnpm build` → **退出码 0**，`dist/` 产出正确
 - `pnpm build`(tsc -b + vite build) → **退出码 0**，产出 `dist/index.html` + `dist/assets/*`
 - `tsc -b --force` → 0 错误
 - `eslint .` → 12 个既有告警，**本次新增文件 0 新增问题**(既有问题清单见下)

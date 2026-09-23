@@ -1,6 +1,18 @@
+# 下面这 5 个包带可选 install 脚本(只做原生加速/降级)。不让它们执行脚本时,
+# pnpm 会以 ERR_PNPM_IGNORED_BUILDS 退出 1；而 Cloudflare 的 install 步骤不由构建命令
+# 控制, 所以必须在仓库里放行, 否则部署会在安装阶段就失败。
+# 两个键是同一件事的新旧写法, 同时保留以兼容不同 pnpm 大版本:
+#   allowBuilds             pnpm 11+
+#   onlyBuiltDependencies   pnpm 9 / 10
 allowBuilds:
-  '@parcel/watcher': set this to true or false
-  '@swc/core': set this to true or false
-  core-js: set this to true or false
-  less: set this to true or false
-  protobufjs: set this to true or false
+  '@parcel/watcher': true
+  '@swc/core': true
+  core-js: true
+  less: true
+  protobufjs: true
+onlyBuiltDependencies:
+  - '@parcel/watcher'
+  - '@swc/core'
+  - core-js
+  - less
+  - protobufjs
