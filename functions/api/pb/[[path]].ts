@@ -769,7 +769,7 @@ async function githubCall(
   }
 }
 
-async function readIndexFile(env: Env, file: string): Promise<RepoFile> {
+async function readIndexRepoFile(env: Env, file: string): Promise<RepoFile> {
   const url = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO + "/contents/" + file + "?ref=" + SYNC_BRANCH
   const res = await githubCall(env, url, "GET")
   if (!res.ok || !isPlainObject(res.data)) return { ok: false, status: res.status, sha: "", json: null }
@@ -855,8 +855,8 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
     return jsonResponse(200, { ok: true, pending: 0, applied: 0, changed: [], notes: ["没有待同步的审核决定"] })
   }
 
-  const sourcesFile = await readIndexFile(env, INDEX_SOURCES_FILE)
-  const moderationFile = await readIndexFile(env, INDEX_MODERATION_FILE)
+  const sourcesFile = await readIndexRepoFile(env, INDEX_SOURCES_FILE)
+  const moderationFile = await readIndexRepoFile(env, INDEX_MODERATION_FILE)
   if (!sourcesFile.ok || !moderationFile.ok) {
     return jsonResponse(502, {
       error: "index_file_unreadable",
