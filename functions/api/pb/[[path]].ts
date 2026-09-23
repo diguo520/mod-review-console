@@ -784,26 +784,41 @@ async function readIndexRepoFile(env: Env, file: string): Promise<RepoFile> {
   return { ok: json !== null, status: res.status, sha: String(res.data.sha || ""), json: json }
 }
 
+/** GitHub 报错时 body 里的 message 是最有用的线索（403 会直接说明缺哪个权限） */
+function githubErrorText(data: unknown): string {
+  if (isPlainObject(data) && typeof data.message === "string") return data.message
+  return ""
+}
+
+type CommitResult = { ok: boolean; status: number; commit: string; stage: string; message: string }
+
 /**
  * 一次提交写多个文件（Git Data API）：blob → tree → commit → 移分支。
  * 为什么不用 contents PUT 逐个文件写：拒绝收录要「同时」删来源 + 写审核理由，
  * 分两次提交会出现「来源没了但理由还没发布」的中间态。原子提交不给这个窗口。
+ * trace 逐步记录 HTTP 结果：线上某一步出问题时，响应里就能看出卡在哪。
  */
-async function commitIndexFiles(
+async function commitIndexFilesOnce(
   env: Env,
+  base: string,
   files: Array<{ path: string; text: string }>,
   message: string,
-): Promise<{ ok: boolean; status: number; commit: string }> {
-  const base = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO
+  trace: string[],
+): Promise<CommitResult> {
+  const fail = (stage: string, status: number, data?: unknown): CommitResult => {
+    const detail = githubErrorText(data)
+    trace.push(stage + " → HTTP " + status + (detail ? " " + detail : ""))
+    return { ok: false, status: status, commit: "", stage: stage, message: detail }
+  }
 
   const refRes = await githubCall(env, base + "/git/ref/heads/" + SYNC_BRANCH, "GET")
   if (!refRes.ok || !isPlainObject(refRes.data) || !isPlainObject(refRes.data.object)) {
-    return { ok: false, status: refRes.status, commit: "" }
+    return fail("ref-read", refRes.status, refRes.data)
   }
   const headSha = String(refRes.data.object.sha || "")
 
   const headRes = await githubCall(env, base + "/git/commits/" + headSha, "GET")
-  if (!headRes.ok || !isPlainObject(headRes.data)) return { ok: false, status: headRes.status, commit: "" }
+  if (!headRes.ok || !isPlainObject(headRes.data)) return fail("head-read", headRes.status, headRes.data)
   const headTree = isPlainObject(headRes.data.tree) ? String(headRes.data.tree.sha || "") : ""
 
   const tree: Array<{ path: string; mode: string; type: string; sha: string }> = []
@@ -812,12 +827,12 @@ async function commitIndexFiles(
       content: files[i].text,
       encoding: "utf-8",
     })
-    if (!blob.ok || !isPlainObject(blob.data)) return { ok: false, status: blob.status, commit: "" }
+    if (!blob.ok || !isPlainObject(blob.data)) return fail("blob:" + files[i].path, blob.status, blob.data)
     tree.push({ path: files[i].path, mode: "100644", type: "blob", sha: String(blob.data.sha || "") })
   }
 
   const treeRes = await githubCall(env, base + "/git/trees", "POST", { base_tree: headTree, tree: tree })
-  if (!treeRes.ok || !isPlainObject(treeRes.data)) return { ok: false, status: treeRes.status, commit: "" }
+  if (!treeRes.ok || !isPlainObject(treeRes.data)) return fail("tree", treeRes.status, treeRes.data)
   const newTree = String(treeRes.data.sha || "")
 
   const commitRes = await githubCall(env, base + "/git/commits", "POST", {
@@ -825,18 +840,54 @@ async function commitIndexFiles(
     tree: newTree,
     parents: [headSha],
   })
-  if (!commitRes.ok || !isPlainObject(commitRes.data)) return { ok: false, status: commitRes.status, commit: "" }
+  if (!commitRes.ok || !isPlainObject(commitRes.data)) return fail("commit", commitRes.status, commitRes.data)
   const newCommit = String(commitRes.data.sha || "")
 
   const refUpdate = await githubCall(env, base + "/git/refs/heads/" + SYNC_BRANCH, "PATCH", {
     sha: newCommit,
     force: false,
   })
-  if (!refUpdate.ok) return { ok: false, status: refUpdate.status, commit: "" }
-  return { ok: true, status: 200, commit: newCommit }
+  if (!refUpdate.ok) return fail("ref-update", refUpdate.status, refUpdate.data)
+  trace.push("ok → " + newCommit.slice(0, 10))
+  return { ok: true, status: 200, commit: newCommit, stage: "done", message: "" }
+}
+
+/**
+ * 抢分支头失败（409/422）说明有别的提交先落地了：重读一次 head 再推一遍。
+ * 要写的内容没变，所以整体重试是安全的。
+ */
+async function commitIndexFiles(
+  env: Env,
+  files: Array<{ path: string; text: string }>,
+  message: string,
+  trace: string[],
+): Promise<CommitResult> {
+  const base = GITHUB_API + "/repos/" + SYNC_OWNER + "/" + SYNC_REPO
+  let last: CommitResult = { ok: false, status: 0, commit: "", stage: "init", message: "" }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    last = await commitIndexFilesOnce(env, base, files, message, trace)
+    if (last.ok) return last
+    if (last.stage !== "ref-update" || (last.status !== 409 && last.status !== 422)) return last
+  }
+  return last
 }
 
 async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promise<Response> {
+  // 未捕获异常在 Cloudflare 上只会变成一张没有线索的 502 报错页。
+  // 这个端点只有管理员会话或共享令牌进得来，所以直接把原因回给调用方。
+  try {
+    return await indexSyncInner(env, db, request)
+  } catch (err) {
+    const e = err as { message?: string; stack?: string }
+    return jsonResponse(500, {
+      error: "index_sync_crashed",
+      message: String((e && e.message) || err),
+      detail: String((e && e.stack) || ""),
+    })
+  }
+}
+
+async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): Promise<Response> {
   const raw = (await request.json().catch(() => ({}))) as { dryRun?: unknown }
   const dryRun = raw.dryRun === true
 
@@ -896,7 +947,11 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
 
   const notes: string[] = []
   const appliedIds: string[] = []
+  const trace: string[] = []
   let lastAt = ""
+  // 重放前先留一份快照：只有 entries 真的变了才允许动 updatedAt，
+  // 否则「当前时间 ≠ 仓库里的时间」会让每次同步都凭空多出一次提交
+  const entriesBefore = JSON.stringify(entries)
 
   for (let i = 0; i < decisions.length; i += 1) {
     const d = decisions[i]
@@ -940,11 +995,10 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
 
   // 序列化口径与 scripts/moderate.mjs 一致：2 空格缩进 + 结尾换行，diff 才不会整片翻红
   const newSources: Record<string, unknown> = { ...sourcesData, schemaVersion: 1, sources: list }
-  const newModeration: Record<string, unknown> = {
-    ...moderationData,
-    schemaVersion: 1,
-    updatedAt: lastAt || new Date().toISOString(),
-    entries: entries,
+  const newModeration: Record<string, unknown> = { ...moderationData, schemaVersion: 1, entries: entries }
+  // 与 scripts/moderate.mjs 同口径：只有审核记录真的变了才刷新 updatedAt
+  if (JSON.stringify(entries) !== entriesBefore) {
+    newModeration.updatedAt = lastAt || new Date().toISOString()
   }
 
   const changed: string[] = []
@@ -973,11 +1027,15 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
       env,
       files,
       "chore(index): 审核结论同步（" + appliedIds.length + " 条决定：" + changed.join("、") + "）",
+      trace,
     )
     if (!written.ok) {
       return jsonResponse(502, {
         error: "index_commit_failed",
         message: "写入索引仓库失败（HTTP " + written.status + "），决定保持未同步，下次会重试",
+        stage: written.stage,
+        detail: written.message,
+        trace: trace,
         changed: changed,
       })
     }
@@ -986,12 +1044,20 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
     notes.push("索引仓库数据与决定一致，无需提交")
   }
 
-  // 先提交再标记：中途失败时决定仍是 applied=0，下次重放一遍即可（重放幂等）
+  // 先提交再标记：中途失败时决定仍是 applied=0，下次重放一遍即可（重放幂等）。
+  // 提交已经落地，所以这一步出错不能报成「提交失败」，只能如实分开说
   const stamp = new Date().toISOString()
+  let stampError = ""
   for (const id of appliedIds) {
     if (!id) continue
-    await db.prepare('UPDATE "mod_decisions" SET applied = 1, updated = ? WHERE id = ?').bind(stamp, id).run()
+    try {
+      await db.prepare('UPDATE "mod_decisions" SET applied = 1, updated = ? WHERE id = ?').bind(stamp, id).run()
+    } catch (err) {
+      stampError = String((err as Error).message || err)
+      break
+    }
   }
+  if (stampError) notes.push("索引已提交，但标记决定状态失败：" + stampError)
 
   return jsonResponse(200, {
     ok: true,
@@ -1000,6 +1066,7 @@ async function indexSync(env: Env, db: D1DatabaseLike, request: Request): Promis
     changed: changed,
     commit: commit,
     notes: notes,
+    stampError: stampError,
   })
 }
 
