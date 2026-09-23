@@ -1,0 +1,122 @@
+# EveJS Mod 收录审核控制台
+
+面向 **EveJS MOD 索引仓库**（默认 `diguo520/EVEjs-mods`）的收录审核后台，支持
+**人工审核** 与 **无人值守** 两种模式。前端是 React SPA，部署在 **Cloudflare Pages**；
+业务后端是 PocketBase；两者之间由 Pages Functions 做同源代理与登录校验。
+
+> 完整的部署、环境变量、GitHub 令牌与安全说明在 **[`DEPLOY.md`](./DEPLOY.md)**。
+> 本文只做总览与快速上手。
+
+## 能做什么
+
+- **双审核模式**：`人工审核`（每条来源都要维护者确认）/ `无人值守`（检查全部通过且无警告的
+  待收录条目自动收录；**检查不通过或已拒绝的绝不自动放行**）。
+- **逐项自动检查**：基于索引仓库的真实字段核对清单、sha256、分类、下载地址、
+  作者密钥与 `author.id` 是否一致等，逐项给出 通过 / 警告 / 不通过 与原因。
+- **9 类筛选**，每类带实时计数：待收录、有警告、检查不通过、仓库失联、已上架、未通过、
+  已下架、已删除、全部。计数与筛选结果同源，不会出现「数量对不上列表」。
+- **单个处置**：收录通过 / 拒绝收录 / 下架 / 恢复上架 / 删除。
+- **删除规则**：未上架（待收录、未通过、已下架）可直接删除；**已上架必须先下架才能删除**。
+  删除会留档（`delete_records` + `review_records` 各一条），理由永久可查，条目转入「已删除」。
+- **批量操作**：勾选多条后批量收录 / 拒绝 / 下架 / 恢复 / 删除，支持「全选本页」「全选筛选结果」
+  「清空已选」。批量按**串行**执行以避免撞 GitHub 限流，不合规的条目会被**跳过并如实回报**
+  成功 / 失败 / 跳过数量，不会静默丢弃。
+- **审核记录 / 处置记录**：完整流水，含操作人与理由，可清空本机记录。
+- **导出审核结果**：导出后在**本机**重建并签名索引仓库，改动才真正生效。
+
+## 架构
+
+```
+浏览器
+  └─ https://<你的域名>            (Cloudflare Pages: 静态站点 + Functions)
+       ├─ /                        → dist/index.html (React SPA)
+       ├─ /api/session             → Function: 管理员账号密码登录, 签发 HttpOnly Cookie
+       └─ /api/pb/**               → Function: 校验会话 → 注入 x-rh-user-id → 转发
+            └─ https://pb.<域名>   (Cloudflare Tunnel → 127.0.0.1:8090)
+                 └─ PocketBase + pb_hooks/*.pb.js → api.github.com (带 GITHUB_TOKEN)
+```
+
+- **前端** `src/`：React + TypeScript + Vite + Tailwind。
+- **Pages Functions** `functions/`：`api/session.ts`（登录）、`api/pb/[[path]].ts`（同源代理）、
+  `_middleware.ts`（SPA 深链回退）、`_routes.json`。
+- **业务后端** `pb_hooks/*.pb.js`：跑在 PocketBase 上，负责读写索引仓库与 GitHub API。
+
+> ⚠️ **PocketBase 不能部署到 Cloudflare Pages**（无常驻进程、无可写本地磁盘），
+> 必须放在一台 VPS 上，详见 `DEPLOY.md` 第 1 节。
+
+## 本地开发
+
+要求 **Node ≥ 22.12**（Vite 8）与 **pnpm**。
+
+```bash
+pnpm install
+pnpm dev          # 纯前端 dev server
+pnpm build        # tsc -b + vite build → dist/
+pnpm lint
+```
+
+> 注意：登录门（`src/components/common/LoginGate.tsx`）已挂在应用最外层，
+> 而纯 `pnpm dev` 没有 `/api/session`，所以会停在登录页。
+> 本地要真正登录，用 `DEPLOY.md` 第 4 节的 `wrangler pages dev dist` + `.dev.vars`。
+
+## 部署到 Cloudflare Pages
+
+1. 推代码到 GitHub（本仓库）。
+2. Cloudflare 控制台 → **Workers & Pages** → **Create** → **Pages** → **Connect to Git** → 选本仓库。
+3. 构建配置：
+
+   | 配置项 | 值 |
+   | --- | --- |
+   | Framework preset | `None`（别选 Vite，会覆盖输出目录） |
+   | Build command | `pnpm build` |
+   | Build output directory | `dist` |
+   | Root directory | 留空 |
+
+4. 环境变量（**管理员账号/密码就配在这里**）见 `DEPLOY.md` 2.3 节；最少要配
+   `PB_ORIGIN`、`ADMIN_USER`、`ADMIN_PASSWORD`（或 `ADMIN_PASSWORD_HASH`）、`SESSION_SECRET`，
+   再加 `NODE_VERSION=22`。
+5. `functions/` 会被自动识别成 Pages Functions，无需额外配置。
+
+改密码 = 改环境变量后**重新部署**才生效；想立刻踢掉所有已登录会话，换 `SESSION_SECRET`。
+
+## 管理员登录
+
+站点只对管理员开放：未登录时不渲染任何业务页面，只显示账号/密码表单。
+会话是 HMAC 签名的 **HttpOnly Cookie**（`mrc_admin`），前端 JS 读不到令牌。
+
+| 变量 | 说明 |
+| --- | --- |
+| `ADMIN_USER` | 管理员账号（必填） |
+| `ADMIN_PASSWORD` | 明文密码，与下面二选一 |
+| `ADMIN_PASSWORD_HASH` | 密码的 SHA-256 十六进制（**推荐**，控制台不落明文；两者都配时以它为准） |
+| `SESSION_SECRET` | 会话签名密钥，随机 32 字节以上（必填） |
+| `SESSION_TTL_HOURS` | 登录有效期小时数，默认 12 |
+
+## GitHub 令牌
+
+**配在 PocketBase 那台机器上，不要配在 Cloudflare Pages。** 读索引仓库、探 `evejs-mod.json`
+清单的代码都在 `pb_hooks/*.pb.js`，是 PocketBase 服务端发起的出站请求。
+
+- 用 **Fine-grained token**，权限只要 **Contents: Read-only**，作用是**把额度从 60 次/小时提到
+  5000 次/小时**。
+- **绝不要**命名成 `VITE_GITHUB_TOKEN` —— Vite 会把 `VITE_` 前缀变量在构建时**内联进
+  `dist/assets/*.js`**，等于把令牌明文发到公网。
+
+## 安全要点
+
+- PocketBase **只监听 `127.0.0.1`**，公网入口走 Cloudflare Tunnel；`pb_hooks` 里用 `routerAdd`
+  注册的接口默认**无鉴权**，裸奔等于把「清空数据库」交给全网。
+- 建议给 Pages 站点再挂一段 **Cloudflare Access** 当第二道门。
+- `pb_data/`（全部审核记录）记得定时备份。
+- 令牌与密钥只写在 Cloudflare 控制台和 systemd 里，**不进仓库**（`.dev.vars` 与 `.wrangler`
+  已在 `.gitignore`）。
+
+## 状态
+
+- `tsc -b --force`、`pnpm build` 均 0 错误通过。
+- 登录门（真实 `functions/api/session.ts`）26 条断言全过；登录流程真实浏览器验收 23 条断言全过；
+  筛选 / 单删 / 批量操作同样做过真实浏览器验收。详见 `DEPLOY.md` 第 8 节。
+- `eslint` 仍有 12 个**改动前就存在**的问题（清单见 `DEPLOY.md` 8 节），本次未新增。
+- **已知边界**：`src/lib/aigc.ts`、`src/lib/llm.ts` 依赖平台（RunningHub VibeX）的 AI 网关，
+  自建部署上不存在，这两个模块及 `RhAccountMenu` / `CostConfirmDialog` 当前未被任何页面引用；
+  `src/lib/rhLogin.ts`（RH SSO）保留未删，要切回平台版只需改 `src/lib/auth.ts` 的导出。
