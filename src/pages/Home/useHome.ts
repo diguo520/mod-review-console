@@ -1502,8 +1502,11 @@ export function useHome() {
     if (indexSyncTimerRef.current !== null) return
     indexSyncTimerRef.current = window.setTimeout(() => {
       indexSyncTimerRef.current = null
-      void apiSend("/api/index/sync", "POST", {}).catch(() => {
-        // 同步失败不回滚审核结果：决定会保持「未同步」，下次动作或定时任务继续重试
+      void apiSend("/api/index/sync", "POST", {}).catch((err: unknown) => {
+        // 同步失败不回滚审核结果：决定会保持「未同步」，下次动作或定时任务继续重试。
+        // 线上最常见的原因是令牌缺 Contents: Read and write（接口回 403），
+        // 留一条控制台线索，省得对着「索引怎么没更新」猜
+        console.warn("[index-sync] 审核结论同步失败，稍后自动重试：", err)
       })
     }, 2500)
   }, [])

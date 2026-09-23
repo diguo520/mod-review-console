@@ -393,3 +393,113 @@ SESSION_SECRET="dev-only-secret-at-least-32-chars-long"
 - 浏览器端到端(无头 Chromium + CDP，**21 条断言全过**)：登录门、9 类筛选计数、
   批量操作台、已上架条目删除被拦住且给出原因、页面零 JS 运行时错误
 - 旧链路已死：本机进程停掉后 `pb.5318.cm` 变 403，而站点数据照常 —— 机器依赖确实去掉
+
+## 11. 零机器依赖：审核结论自动上架(2026-09-24)
+
+目标：从「点一下审核」到「启动器可见」的每一步都跑在 Cloudflare / GitHub 上，
+维护者关机、断网、睡觉都照常。
+
+### 11.1 链路
+
+```
+前端审核动作 ─┬─→ D1 mod_decisions (applied = 0)
+             │
+cron Worker ─┘ (每 10 分钟, */10 * * * *, 见 cron/)
+             │
+             └─→ POST https://<站点>/api/pb/api/index/sync   (头: x-index-sync-token)
+                   · 取 applied = 0 的决定, 重放出 sources.json / moderation.json
+                   · 原子提交: blob → tree → commit → 移分支(force: false)
+                   · 成功才置 applied = 1; 失败保持 0, 下轮重放(幂等)
+                   ↓
+             索引仓库 Actions (sources.json / moderation.json 变更触发)
+                   · 用 Actions Secret 里的 INDEX_SIGNING_KEY 签名
+                   · 提交 docs/mod-index.json
+                   ↓
+             启动器读取
+```
+
+### 11.2 部署定时任务(只做一次)
+
+```bash
+npx wrangler deploy --config cron/wrangler.toml
+npx wrangler secret put INDEX_SYNC_TOKEN --config cron/wrangler.toml
+```
+
+第一句输出里应看到 `schedule: */10 * * * *`。换域名改 `cron/wrangler.toml` 的
+`SYNC_URL`，再跑一次 `wrangler deploy`。
+
+### 11.3 验证「无人值守」真的成立
+
+放一条不需要改仓库的决定，然后**什么都不做**，看它是否自己变成 `applied = 1`：
+
+1. 用管理员会话写一条「无实质变化」的决定（例如 `restore` 一个不存在的目标：
+   只标记、不提交仓库）。
+2. 记下时间，直接查 D1（走 Cloudflare API，不经过站点）。
+3. 等下一个整十分钟点（:00 / :10 / :20 ...），再看 `applied` 是否变成 1。
+
+**实测结果（2026-09-24）**：23:15:36 写入 → **23:20:17** 自动标记完成，
+全程没有打开控制台、没有手点同步接口 —— Cloudflare 定时任务 → Worker → 站点同步接口 → D1
+这条无人值守链路成立。
+
+### 11.4 索引仓库侧要做的一行改动
+
+`diguo520/EVEjs-mods` 的 `.github/workflows/build-index.yml` 触发条件目前是：
+
+```yaml
+on:
+  push:
+    paths: [sources.json, scripts/**, .github/workflows/build-index.yml]
+```
+
+**下架 / 拒绝收录只改 `moderation.json`**，不会触发重建，索引不会更新。加一项即可：
+
+```yaml
+    paths: [sources.json, moderation.json, scripts/**, .github/workflows/build-index.yml]
+```
+
+（改 `.github/workflows/*` 需要令牌带 **Workflows: Read and write**；也可以直接在
+GitHub 网页上编辑这个文件，不占令牌权限。）
+
+不加也能用，只是**下架 / 拒绝收录的生效会晚到下一个整 6 小时**（工作流本身有
+`cron: "0 */6 * * *"` 兜底）；收录（approve）走 `sources.json`，本来就是即时触发。
+
+### 11.5 排查表
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 同步接口报 `424 index_file_unreadable` | 拉不到索引仓库文件 | 看 `detail` 里两个 HTTP 状态码；403 通常是令牌没勾 `diguo520/EVEjs-mods` |
+| `403 index_commit_failed` + `Resource not accessible` | 令牌没有 Contents: Read and write | 见 3.1 权限表；改完不用换令牌 |
+| `409 index_commit_failed` | 真有并发提交抢先，重试 3 次仍冲突 | 等下一轮定时任务再跑；决定仍是 `applied = 0`，不会丢 |
+| 5xx 且响应体是 Cloudflare 错误页 / 空 body | Cloudflare 会把 Pages Functions 的 5xx 响应体换成自己的错误页 | 这正是设计上改用 4xx 的原因；看到 5xx 说明问题在函数之外的层 |
+| 点完审核索引一直没变 | ①令牌没写权限 ②定时任务没部署 ③11.4 的 `paths` 没加 | 按 11.3 的标记法定位卡在哪一环 |
+
+### 11.6 索引回写链路的本地验证(不需要任何令牌)
+
+```bash
+wrangler pages functions build --outdir=$env:TEMP/fnbuild
+# 把产物里的 https://api.github.com 换成 http://127.0.0.1:8791, 起一个假 GitHub
+# (contents / refs / commits / blobs / trees 五个接口), 断言:
+#   · 正常提交: 200 + 返回 commit, 调用顺序为 blob→tree→commit→ref
+#   · 409 冲突: 自动重推一次并成功(patchAttempts=2)
+#   · 403: 回 403(不是 5xx), message 点明缺 Contents 写权限, 并带 stage/detail/trace
+```
+
+### 11.7 第二轮改动清单(2026-09-24)
+
+新增:
+
+- `cron/wrangler.toml`、`cron/src/index.js` —— Cloudflare 定时任务 Worker（每 10 分钟调一次同步接口）
+- `DEPLOY.md` 第 11 节、`README.md`「零机器依赖」一节
+
+修改（`functions/api/pb/[[path]].ts`）:
+
+- 新增 `POST /api/pb/api/index/sync@@`：把 D1 里 `applied = 0` 的审核决定重放成
+  `sources.json` / `moderation.json`，原子提交（blob → tree → commit → 移分支）
+- `updatedAt` 只在审核记录真的变化时才刷新 —— 之前无条件写当前时间，
+  导致「没有待同步决定也会提交一次空的 moderation.json」
+- 提交失败回 4xx（403/404/409/424），响应里带 `stage` / `detail` / `trace`：
+  Cloudflare 会把 Pages Functions 的 5xx 响应体换成自己的错误页，5xx 等于把原因藏起来
+- 抢分支头失败（409/422）自动重读 head 重试，最多 3 次
+- 标记 `applied` 失败不再伪装成「提交失败」，单独用 `stampError` 回报
+- 共享令牌 `INDEX_SYNC_TOKEN`（请求头 `x-index-sync-token`）只对同步接口生效，
+  给定时任务用；其余端点仍只认管理员会话
