@@ -691,6 +691,7 @@ async function indexSyncTokenOk(env: Env, request: Request): Promise<boolean> {
 //   reject  拒绝收录 → 写 moderation.json；来源级拒绝同时从 sources.json 移除
 //   delist  下架     → 只写 moderation.json（条目留在索引里并标记 delisted）
 //   restore 撤销     → 从 moderation.json 删掉该条记录
+//   delete  永久删除 → moderation.json 记一条 reject（永久除名），来源级同时从 sources.json 移除
 //
 // 只重放「还没同步过」的决定（applied = 0）。不做整体重放：sources.json 是外部事实，
 // 作者的提交本来就是以 PR 形式直接改进来的，整体重放会把没有 approve 决定的来源整片删掉。
@@ -993,6 +994,26 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
         const before = list.length
         list = list.filter((x) => x.toLowerCase() !== target.toLowerCase())
         if (list.length !== before) notes.push("已从 sources.json 移除被拒绝的来源 " + target)
+      }
+    } else if (action === "delete") {
+      // 永久删除：把条目从索引仓库彻底剔除。build-index.mjs 只认 reject / delist 两个动作，
+      // 所以永久除名以 reject 落盘；来源级会顺手把 sources.json 里的来源也移除，
+      // 之后索引重建不会再抓它。对同一条目重复删除是幂等的，正好用来补同步。
+      const zh =
+        String(d.reason_zh === undefined ? "" : d.reason_zh).trim() || "维护者已永久删除该条目"
+      const en = String(d.reason_en === undefined ? "" : d.reason_en).trim() || zh
+      entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
+      entries.push({ target: target, kind: kind, action: "reject", reason: { zh: zh, en: en }, at: at, by: by })
+      if (kind === "source") {
+        const before = list.length
+        list = list.filter((x) => x.toLowerCase() !== target.toLowerCase())
+        notes.push(
+          list.length !== before
+            ? "已从 sources.json 永久移除 " + target
+            : "sources.json 里本来就没有 " + target + "，只补写了永久除名记录",
+        )
+      } else {
+        notes.push("已在 moderation.json 里永久除名 " + target)
       }
     } else if (action === "restore") {
       entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)

@@ -11,10 +11,10 @@ export type CheckStatus = "pass" | "warn" | "fail"
 export type ReviewMode = "auto" | "manual"
 /** 队列状态：待收录 / 已上架 / 未通过 / 已下架 */
 export type QueueStatus = "pending" | "published" | "rejected" | "delisted"
-/** 审核动作：收录通过 / 拒绝收录 / 下架 / 恢复上架 / 删除 */
+/** 审核动作：收录通过 / 拒绝收录 / 下架 / 恢复上架 / 永久删除 */
 export type DecisionAction = "approve" | "reject" | "delist" | "restore" | "delete"
-/** 能落到 mod_decisions 的动作：删除不写决定，只写留档 */
-export type DecisionWriteAction = Exclude<DecisionAction, "delete">
+/** 能落到 mod_decisions 的动作：永久删除也要写决定，同步时据此把条目从索引仓库剔除 */
+export type DecisionWriteAction = DecisionAction
 /** 问题筛选：按体检结论挑条目 —— 大规模审核时先处理这三类最要紧 */
 export type QueueIssueFilter = "warn" | "fail" | "offline"
 /**
@@ -305,13 +305,13 @@ export const ACTION_LABELS: Record<string, string> = {
   reject: "拒绝收录",
   delist: "下架",
   restore: "恢复上架",
-  delete: "删除",
+  delete: "永久删除",
 }
 
 export const ACTION_KIND_LABELS: Record<string, string> = {
   reject: "拒绝收录",
   delist: "已下架",
-  delete: "已删除",
+  delete: "已永久删除",
 }
 
 export const DECISION_ACTIONS: Array<{ value: DecisionAction; label: string; hint: string }> = [
@@ -319,7 +319,7 @@ export const DECISION_ACTIONS: Array<{ value: DecisionAction; label: string; hin
   { value: "reject", label: "拒绝收录", hint: "必填理由，并从收录名单移除" },
   { value: "delist", label: "下架", hint: "必填理由，索引保留但标记为已下架" },
   { value: "restore", label: "恢复上架", hint: "撤销之前对该条目的审核结果" },
-  { value: "delete", label: "删除", hint: "必填理由：未上架可直接删除，已上架必须先下架" },
+  { value: "delete", label: "永久删除", hint: "必填理由：从索引仓库剔除该条目，已上架必须先下架" },
 ]
 
 export function summarizeChecks(items: CheckItem[] | null): CheckStatus {
@@ -374,10 +374,10 @@ export const BULK_REASON_REQUIRED: DecisionAction[] = ["reject", "delist", "dele
  * - 拒绝收录：只作用于「待收录 / 未通过」（已上架的不能整批从索引里抹掉）
  * - 下架：作用于「已上架 / 待收录」（待收录按清理处理，与「清理失联」一致）
  * - 恢复上架：只作用于存在审核结果的条目
- * - 删除：已上架的一律跳过，必须先下架
+ * - 删除：已上架的一律跳过，必须先下架；已删除留档的条目只允许再删一次（补剔除索引）
  */
 export function bulkActionAllowed(item: QueueItem, action: DecisionAction): boolean {
-  if (item.deleted) return false
+  if (item.deleted) return action === "delete"
   switch (action) {
     case "approve":
       return item.status === "pending"
@@ -841,6 +841,7 @@ function overlayStatus(base: QueueStatus, action: string): QueueStatus {
   if (action === "approve") return "published"
   if (action === "reject") return "rejected"
   if (action === "delist") return "delisted"
+  if (action === "delete") return "rejected"
   if (action === "restore") {
     if (base === "delisted") return "published"
     if (base === "rejected") return "pending"
@@ -858,7 +859,11 @@ function withDecision(item: QueueItem, decision: DecisionLike | undefined): Queu
   if (!decision?.action) return item
   const status = overlayStatus(item.baseStatus, decision.action)
   let reason = item.reason
-  if (decision.action === "reject" || decision.action === "delist") {
+  if (
+    decision.action === "reject" ||
+    decision.action === "delist" ||
+    decision.action === "delete"
+  ) {
     reason = decision.reason_zh || item.reason
   } else if (decision.action === "restore") {
     reason = ""
@@ -1452,15 +1457,13 @@ export function useHome() {
       const decisionId = decisionIdByTarget.get(item.target)
 
       if (action === "delete") {
-        // 删除：还没收进索引的条目先按「拒绝收录」落地（作者侧看到的就是不收录），
-        // 再写一条 action_kind = delete 的处置留档 —— 删除后的条目据此退出工作队列。
-        // 已经下架的条目保持下架（索引里本来就没有它），删除只在留档里体现。
-        if (item.status === "pending") {
-          await submitDecision(item, "reject", reasonText, { decisionId })
-          applyLocalDecision(item, "reject", reasonText)
-        }
+        // 永久删除：写一条 delete 决定，同步时索引仓库会据此把条目剔除
+        // （来源级连 sources.json 里的来源一起移除），同时写处置留档让条目退出工作队列。
+        // 对已经留档的条目再点一次是幂等的，正好用来补同步。
+        await submitDecision(item, "delete", reasonText, { decisionId })
         await writeReviewRecord(item, "delete", reasonText, modeValue)
         await writeDeleteRecord(item, "delete", reasonText)
+        applyLocalDecision(item, "delete", reasonText)
         return
       }
 
@@ -1612,7 +1615,8 @@ export function useHome() {
   )
 
   /**
-   * 删除单条 MOD。规则：未上架的可以直接删；已上架的必须先下架，再回来删 ——
+   * 永久删除单条 MOD：同步时索引仓库会把它剔除（来源级连 sources.json 里的来源一起移除）。
+   * 规则：未上架的可以直接删；已上架的必须先下架，再回来删 ——
    * 让「下架」和「删除」分成两步，删除这种不可逆的动作就永远有一步缓冲。
    */
   const deleteItem = useCallback(
@@ -1639,7 +1643,7 @@ export function useHome() {
           next.delete(item.key)
           return next
         })
-        setToast({ kind: "ok", text: `已删除《${itemLabel(item)}》，理由已留档` })
+        setToast({ kind: "ok", text: `已永久删除《${itemLabel(item)}》，索引仓库会同步剔除该条目` })
         return true
       } catch {
         setToast({ kind: "error", text: "删除未成功，请重试" })
@@ -2126,7 +2130,7 @@ export function useHome() {
           entries: exportEntries.map((d) => ({
             target: d.target,
             kind: d.kind || (d.target.includes("/") ? "source" : "id"),
-            action: d.action,
+            action: d.action === "delete" ? "reject" : d.action,
             reason: { zh: d.reason_zh || "", en: d.reason_en || "" },
             at: d.decided_at || "",
             by: d.operator || "",
@@ -2140,7 +2144,9 @@ export function useHome() {
 
   const exportSources = useMemo(() => {
     const rejected = new Set(
-      exportEntries.filter((d) => d.action === "reject").map((d) => d.target),
+      exportEntries
+        .filter((d) => d.action === "reject" || d.action === "delete")
+        .map((d) => d.target),
     )
     const sources = Array.isArray(sync?.sources) ? sync?.sources ?? [] : []
     return sources.filter((s) => s && !rejected.has(s))

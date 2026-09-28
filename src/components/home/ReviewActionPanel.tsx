@@ -45,9 +45,9 @@ const REASON_COPY: Record<
     submit: "确认下架",
   },
   delete: {
-    label: "删除的理由（必填）",
-    placeholder: "写明为什么彻底删除这个 MOD，理由会连同操作人一并留档",
-    submit: "确认删除",
+    label: "永久删除的理由（必填）",
+    placeholder: "写明为什么彻底删除这个 MOD，理由会连同操作人一并留档并同步到索引仓库",
+    submit: "确认永久删除",
   },
 }
 
@@ -66,7 +66,7 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
       <section className="flex h-full flex-col rounded-lg border border-dashed border-border bg-card p-5 shadow-md">
         <h2 className="text-base font-semibold text-card-foreground">审核操作区</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          选中队列里的条目后，这里会出现收录通过、拒绝收录、下架与恢复上架的入口。
+          选中队列里的条目后，这里会出现收录通过、拒绝收录、下架、恢复上架与永久删除的入口。
         </p>
       </section>
     )
@@ -75,13 +75,16 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
   const summary = summarizeChecks(item.checks)
   // 已上架的条目不能直接删：先下架、再删除，删除这种不可逆的动作就永远有一步缓冲
   const deleteBlocked = item.status === "published"
+  // 已留档的条目仍允许再点一次「永久删除」：重复删除幂等，正好用来把索引仓库里漏掉的补剔除
+  const deletedRepair = item.deleted === true
   const reasonKind: "reject" | "delist" | "delete" | null =
     p.actionKind === "reject" || p.actionKind === "delist" || p.actionKind === "delete"
       ? p.actionKind
       : null
   const needsReason = reasonKind !== null
   const dangerous = needsReason
-  const blocked = (p.actionKind === "delete" && deleteBlocked) || item.deleted
+  const blocked =
+    (p.actionKind === "delete" && deleteBlocked) || (item.deleted && p.actionKind !== "delete")
   const canSubmit = (!needsReason || p.reason.trim().length > 0) && !p.busy && !blocked
   const activeHint = DECISION_ACTIONS.find((a) => a.value === p.actionKind)?.hint ?? ""
   const copy = reasonKind ? REASON_COPY[reasonKind] : null
@@ -118,8 +121,8 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
       {item.deleted ? (
         <p className="flex items-start gap-2 rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           <Eraser className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          这条已经删除并留档（{item.deletedReason || "未填写理由"}），不再参与审核与批量操作；
-          需要重新收录请先在下架记录里核对，再回索引仓库处理。
+          这条已经删除并留档（{item.deletedReason || "未填写理由"}），不再参与审核与批量操作。
+          如果索引仓库里还留着它，选中「永久删除」再提交一次即可补剔除（重复删除是幂等的）。
         </p>
       ) : null}
 
@@ -146,7 +149,8 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
             const actionDangerous =
               action.value === "reject" || action.value === "delist" || action.value === "delete"
             const actionBlocked =
-              (action.value === "delete" && deleteBlocked) || item.deleted
+              (action.value === "delete" && deleteBlocked) ||
+              (item.deleted && action.value !== "delete")
             return (
               <Button
                 key={action.value}
@@ -249,7 +253,9 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
         <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {deleteBlocked
             ? "这条已经上架，不能直接删除：先下架，确认无误后再回来删除。"
-            : "删除不可逆：条目会退出工作队列（未上架的按拒绝收录落地），之后只能在「已删除」筛选与操作记录里回溯。"}
+            : deletedRepair
+              ? "这条已经删除留档。再提交一次会重放永久删除决定，把索引仓库里剩余的记录也剔除掉。"
+              : "永久删除不可逆：条目会退出工作队列，并同步从索引仓库剔除（来源级的连收录名单一起移除），之后只能在「已删除」筛选与操作记录里回溯。"}
         </p>
       ) : null}
     </section>

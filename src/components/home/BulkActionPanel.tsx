@@ -29,7 +29,7 @@ const BULK_ACTIONS: Array<{
   { value: "reject", icon: Ban, danger: true, hint: "处理「待收录 / 未通过」" },
   { value: "delist", icon: Trash2, danger: true, hint: "处理「已上架 / 待收录」" },
   { value: "restore", icon: RotateCcw, danger: false, hint: "处理已有审核结论的条目" },
-  { value: "delete", icon: Eraser, danger: true, hint: "已上架的先下架，才能删" },
+  { value: "delete", icon: Eraser, danger: true, hint: "永久剔除：已上架的先下架" },
 ]
 
 /**
@@ -153,8 +153,8 @@ export function BulkActionPanel(p: BulkActionPanelProps) {
 
           {pendingAction === "delete" ? (
             <p className="text-xs text-destructive">
-              删除不可逆：这些条目会退出工作队列，之后只能在「已删除」筛选和操作记录里回溯。
-              已上架的条目必须先下架再删。
+              永久删除不可逆：这些条目会退出工作队列，并同步从索引仓库剔除（来源级的连收录名单
+              一起移除），之后只能在「已删除」筛选和操作记录里回溯。已上架的条目必须先下架再删。
             </p>
           ) : null}
 

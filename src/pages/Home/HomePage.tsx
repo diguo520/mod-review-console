@@ -58,8 +58,9 @@ export function HomePage(p: ReturnType<typeof useHome>) {
             <h2 className="mt-2 text-4xl font-bold text-card-foreground">模组收录审核工作台</h2>
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
               队列里的条目全部来自维护者索引仓库：核对资料与逐项自动检查后，决定收录通过、拒绝收录、
-              下架、恢复上架或删除，拒绝、下架与删除都要写明理由。条目可以勾选后批量处理，
-              已上架的必须先下架才能删除。审核结论导出成两个文件带回本机重建索引，改动才会真正生效。
+              下架、恢复上架或永久删除，拒绝、下架与删除都要写明理由。条目可以勾选后批量处理，
+              已上架的必须先下架才能删除。审核结论会自动回写索引仓库（永久删除会把条目从索引里剔除）；
+              令牌只读时也可以用「导出」拿到 moderation.json 与 sources.json 自行提交。
             </p>
           </div>
           <div className="flex flex-col justify-between gap-4 rounded-md border border-border bg-background/60 p-4">
