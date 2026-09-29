@@ -311,12 +311,19 @@ async function updateRecord(db: D1DatabaseLike, collection: string, def: Collect
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
   const sets: string[] = []
   const binds: Array<string | number> = []
+  // 审核决定是「待同步」状态机：/api/index/sync 只重放 applied = 0 的行（见 indexSyncInner）。
+  // 改动决定后必须把 applied 复位，否则这条决定永远躺在 applied = 1 上，索引仓库与启动器
+  // 就一直停在旧结论 —— 「下架改成拒绝收录后状态不切换」正是这么来的。
+  const resetsApplied =
+    collection === "mod_decisions" && def.fields.some((field) => field !== "applied" && hasOwn(body, field))
   for (let i = 0; i < def.fields.length; i += 1) {
     const field = def.fields[i]
     if (!hasOwn(body, field)) continue
+    if (field === "applied" && resetsApplied) continue // 由下面的复位语句统一写 0
     sets.push('"' + field + '" = ?')
     binds.push(normalizeValue(field, body[field]))
   }
+  if (resetsApplied) sets.push('"applied" = 0')
   sets.push('"updated" = ?')
   binds.push(new Date().toISOString())
   await db.prepare('UPDATE "' + collection + '" SET ' + sets.join(", ") + ' WHERE "id" = ?').bind(...binds, id).run()
