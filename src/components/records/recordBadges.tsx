@@ -67,7 +67,7 @@ export function RepoAliveBadge({
   )
 }
 
-/** 记录来源徽标：已生效（索引仓库） / 待应用（本机操作） */
+/** 记录来源徽标：索引仓库结论 / 本机审核流水 */
 export function OriginBadge({
   origin,
   className,

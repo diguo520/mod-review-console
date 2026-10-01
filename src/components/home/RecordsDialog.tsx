@@ -9,6 +9,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ACTION_KIND_LABELS, ACTION_LABELS, formatDateTime } from "@/pages/Home/useHome"
 import type { DeleteRecord, ReviewRecord } from "@/pages/Home/useHome"
+import { ORIGIN_LABELS } from "@/pages/Records/useRecords"
 import { cn } from "@/lib/utils"
 
 interface RecordsDialogProps {
@@ -43,7 +44,7 @@ export function RecordsDialog(p: RecordsDialogProps) {
           <DialogTitle className="text-card-foreground">操作记录</DialogTitle>
           <DialogDescription className="text-muted-foreground">
             无人值守自动收录、人工收录通过、拒绝收录、下架与删除都会留痕，按时间倒序排列；
-            索引仓库里已经生效的审核结果也一并列出，标为「已生效」。
+            索引仓库里的审核结论也一并列出，标为「索引仓库」。
           </DialogDescription>
         </DialogHeader>
 
@@ -79,11 +80,11 @@ export function RecordsDialog(p: RecordsDialogProps) {
                       <span className="flex items-center gap-1.5">
                         {r.origin === "repo" ? (
                           <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
-                            已生效
+                            {ORIGIN_LABELS.repo}
                           </span>
                         ) : (
                           <span className="rounded-full border border-border bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
-                            待应用
+                            {ORIGIN_LABELS.local}
                           </span>
                         )}
                         <span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-xs text-primary">

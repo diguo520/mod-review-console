@@ -72,7 +72,7 @@ interface SyncModLite {
   repo?: string
 }
 
-/** 索引仓库里已生效的审核结果（/api/mod-sync/state 的 moderation{}） */
+/** 索引仓库里的审核结论（/api/mod-sync/state 的 moderation{}），reject / delist 才会写进仓库 */
 interface SyncModerationLite {
   id?: string
   source?: string
@@ -104,7 +104,7 @@ export interface ModSnapshot {
 export interface TimelineItem {
   id: string
   source: "review" | "delete" | "check" | "sync"
-  /** 记录来源：索引仓库已生效 / 本机待应用 */
+  /** 记录来源：索引仓库结论 / 本机审核流水 */
   origin: RecordOrigin
   action: RecordAction
   /** 仓库里的原始动作名；与 action 不同时在详情里额外展示，不丢信息 */
@@ -130,9 +130,9 @@ export interface RecordStats {
   restore: number
   delete: number
   repo_check: number
-  /** 当前筛选下已生效（来自索引仓库）的条数 */
+  /** 当前筛选下来自索引仓库的条数 */
   repo: number
-  /** 当前筛选下待应用（本机操作）的条数 */
+  /** 当前筛选下本机审核流水的条数 */
   local: number
 }
 
@@ -179,19 +179,19 @@ export const TIME_RANGES: Array<{ value: TimeRange; label: string }> = [
 ]
 
 export const ORIGIN_LABELS: Record<RecordOrigin, string> = {
-  repo: "已生效",
-  local: "待应用",
+  repo: "索引仓库",
+  local: "本机流水",
 }
 
 export const ORIGIN_HINTS: Record<RecordOrigin, string> = {
-  repo: "来自索引仓库，这条审核结果已经在线上生效",
-  local: "本机操作记录，导出并重建索引之后才会在索引仓库里生效",
+  repo: "来自索引仓库：拒绝 / 下架这类结论会写进索引并立即对站点生效（收录通过则会从结论里移除）",
+  local: "本机审核流水。结论会自动同步进索引仓库并触发重建，这里只是本机留痕，不需要手动导出",
 }
 
 export const ORIGIN_FILTERS: Array<{ value: OriginFilter; label: string }> = [
   { value: "all", label: "全部来源" },
-  { value: "repo", label: "已生效" },
-  { value: "local", label: "待应用" },
+  { value: "repo", label: "索引仓库" },
+  { value: "local", label: "本机流水" },
 ]
 
 const TIMELINE_PAGE_SIZE = 50

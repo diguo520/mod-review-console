@@ -32,11 +32,11 @@ export function RecordsStatStrip(p: RecordsStatStripProps) {
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
             <span className="h-1.5 w-1.5 rounded-full bg-current" />
-            已生效 {p.stats.repo}
+            索引仓库 {p.stats.repo}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
             <span className="h-1.5 w-1.5 rounded-full bg-current" />
-            待应用 {p.stats.local}
+            本机流水 {p.stats.local}
           </span>
         </div>
       </div>

@@ -37,8 +37,8 @@ export function RecordsPage(p: ReturnType<typeof useRecords>) {
             <h2 className="mt-2 text-4xl font-bold text-card-foreground">审核动作记录中心</h2>
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
               收录通过、拒绝收录、自动放行、下架、恢复上架与仓库巡检汇成一条按时间倒序的时间线，
-              索引仓库里已经生效的审核结果也一并列出。用不同颜色区分动作类型、用来源徽标区分
-              已生效与待应用，点开任意一条可以看到完整理由与 MOD 快照。
+              索引仓库里的审核结论也一并列出。用不同颜色区分动作类型、用来源徽标区分
+              索引仓库与本机流水，点开任意一条可以看到完整理由与 MOD 快照。
             </p>
           </div>
           <div className="flex flex-col justify-between gap-4 rounded-md border border-border bg-background/60 p-4">
@@ -152,11 +152,11 @@ export function RecordsPage(p: ReturnType<typeof useRecords>) {
               </div>
               <ul className="mt-3 space-y-2">
                 <li className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
-                  <p className="text-sm font-medium text-primary">已生效</p>
+                  <p className="text-sm font-medium text-primary">索引仓库</p>
                   <p className="mt-1 text-xs text-muted-foreground">{ORIGIN_HINTS.repo}</p>
                 </li>
                 <li className="rounded-md border border-border bg-background/60 px-3 py-2">
-                  <p className="text-sm font-medium text-foreground">待应用</p>
+                  <p className="text-sm font-medium text-foreground">本机流水</p>
                   <p className="mt-1 text-xs text-muted-foreground">{ORIGIN_HINTS.local}</p>
                 </li>
               </ul>
@@ -178,7 +178,7 @@ export function RecordsPage(p: ReturnType<typeof useRecords>) {
 
       <footer className="relative mx-auto w-full max-w-[1600px] px-6 pb-10">
         <div className="rounded-lg border border-dashed border-border px-4 py-4 text-xs text-muted-foreground">
-          时间线由索引仓库里已生效的审核结果、本机审核流水、处置留档与仓库巡检合并而成，筛选条件会同时收敛时间线与顶部统计。
+          时间线由索引仓库里的审核结论、本机审核流水、处置留档与仓库巡检合并而成，筛选条件会同时收敛时间线与顶部统计。
         </div>
       </footer>
 
