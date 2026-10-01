@@ -79,6 +79,29 @@ export function ModDetailPanel({ mod, loading, onReinspect }: ModDetailPanelProp
         </div>
       </div>
 
+      {mod.status === "resubmitted" ? (
+        <div className="rounded-md border border-border bg-secondary px-3 py-2 text-xs text-secondary-foreground">
+          <p className="font-medium">
+            重新提交复审
+            {mod.previousAction === "delist" ? "（此前已下架）" : "（此前未通过）"}
+            {mod.previousAt ? ` · ${mod.previousAt.slice(0, 10)}` : ""}
+          </p>
+          <p className="mt-1">
+            {mod.resubmitNote || "作者更新后重新提交"}。
+            {mod.previousReason ? `上次结论：${mod.previousReason}。` : ""}
+            {mod.autoResubmit
+              ? "自动检查全部通过时，无人值守模式会直接复审收录。"
+              : "该条需要人工复审，无人值守模式不会自动放行。"}
+          </p>
+        </div>
+      ) : null}
+
+      {mod.permanent ? (
+        <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          已永久除名：作者再次提交也不会回到复审队列。
+        </p>
+      ) : null}
+
       {mod.manifestFromSource ? (
         <p className="rounded-md border border-dashed border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
           该来源尚未收录进索引，以下资料来自来源仓库的清单文件。

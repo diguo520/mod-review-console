@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, Ban, CheckCircle2, Inbox, WifiOff } from "lucide-react"
+import { AlertTriangle, Archive, Ban, CheckCircle2, Inbox, RotateCcw, WifiOff } from "lucide-react"
 import type { QueueStats, ReviewMode } from "@/pages/Home/useHome"
 import { cn } from "@/lib/utils"
 
@@ -34,6 +34,14 @@ export function StatStrip({ stats, mode, autoPromotedCount }: StatStripProps) {
       hint: mode === "auto" ? "无人值守会立即收录" : "切到无人值守即自动收录",
       icon: CheckCircle2,
       accent: "text-primary",
+    },
+    {
+      key: "resubmitted",
+      label: "重新提交",
+      value: stats.resubmitted,
+      hint: "作者更新后重新提交，等待复审",
+      icon: RotateCcw,
+      accent: "text-secondary-foreground",
     },
     {
       key: "published",
@@ -77,7 +85,7 @@ export function StatStrip({ stats, mode, autoPromotedCount }: StatStripProps) {
           共 <span className="text-primary">{stats.total}</span> 条来源在队列里
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-7">
         {tiles.map((tile) => {
           const Icon = tile.icon
           return (

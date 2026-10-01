@@ -53,8 +53,10 @@ const REASON_COPY: Record<
 
 const STATUS_HINT: Record<string, string> = {
   pending: "这条来源还在收录名单里，索引仓库中还没有它的模组记录。",
+  resubmitted:
+    "作者更新了这条曾被拒绝 / 已下架的 MOD 并重新提交，索引里还没生效：复审通过后新版本才会进索引。",
   published: "这条模组已经收录上架，索引里可以看到它。",
-  rejected: "这条来源已被拒绝收录，收录名单里已经没有它。",
+  rejected: "这条来源已被拒绝收录，索引里不会收录它；作者重新提交后会回到复审队列。",
   delisted: "这条模组已被下架，索引保留但标记为已下架。",
 }
 
@@ -117,6 +119,30 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
       </div>
 
       <p className="text-xs text-muted-foreground">{STATUS_HINT[item.status] ?? ""}</p>
+
+      {item.status === "resubmitted" ? (
+        <div className="rounded-md border border-border bg-secondary px-3 py-2 text-xs text-secondary-foreground">
+          <p className="font-medium">
+            重新提交复审
+            {item.previousAction === "delist" ? "（此前已下架）" : "（此前未通过）"}
+            {item.previousAt ? ` · ${item.previousAt.slice(0, 10)}` : ""}
+          </p>
+          <p className="mt-1">
+            {item.resubmitNote || "作者更新后重新提交"}。
+            {item.previousReason ? `上次结论：${item.previousReason}。` : ""}
+            {item.autoResubmit
+              ? "本次自动检查全部通过时，无人值守模式会直接复审收录（理由属于自动检查可复核的类别）。"
+              : "该条需要人工复审：无人值守模式不会自动放行。"}
+          </p>
+        </div>
+      ) : null}
+
+      {item.permanent ? (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          这条已被永久除名：作者再次提交也不会回到复审队列，除非先撤销这条决定。
+        </div>
+      ) : null}
 
       {item.deleted ? (
         <p className="flex items-start gap-2 rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
@@ -239,7 +265,8 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
 
       {p.actionKind === "reject" ? (
         <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          拒绝收录会把这条来源从收录名单里移除；作者修正后可以重新提交，届时会回到待收录队列。
+          拒绝收录会把这条来源从收录名单里移除，并写入索引仓库的审核结论；
+          作者修正后重新提交（PR 重新登记这个来源）会自动回到「重新提交」队列，等待复审。
         </p>
       ) : null}
 

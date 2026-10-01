@@ -16,6 +16,7 @@ const SUMMARY_CLASS: Record<CheckStatus, string> = {
 
 const QUEUE_CLASS: Record<QueueStatus, string> = {
   pending: "bg-secondary text-secondary-foreground border-border",
+  resubmitted: "bg-secondary text-secondary-foreground border-border",
   published: "bg-primary/10 text-primary border-primary/30",
   rejected: "bg-destructive/10 text-destructive border-destructive/30",
   delisted: "bg-muted text-muted-foreground border-border",

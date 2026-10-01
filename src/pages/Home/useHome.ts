@@ -9,8 +9,11 @@ import { getSessionUser } from "@/lib/session"
 
 export type CheckStatus = "pass" | "warn" | "fail"
 export type ReviewMode = "auto" | "manual"
-/** 队列状态：待收录 / 已上架 / 未通过 / 已下架 */
-export type QueueStatus = "pending" | "published" | "rejected" | "delisted"
+/**
+ * 队列状态：待收录 / 重新提交 / 已上架 / 未通过 / 已下架。
+ * 「重新提交」= 作者更新了曾被拒绝或已下架的 MOD 并重新提交，需要复审。
+ */
+export type QueueStatus = "pending" | "resubmitted" | "published" | "rejected" | "delisted"
 /** 审核动作：收录通过 / 拒绝收录 / 下架 / 恢复上架 / 永久删除 */
 export type DecisionAction = "approve" | "reject" | "delist" | "restore" | "delete"
 /** 能落到 mod_decisions 的动作：永久删除也要写决定，同步时据此把条目从索引仓库剔除 */
@@ -64,6 +67,8 @@ export interface SyncModeration {
   reason?: { zh?: string; en?: string }
   at?: string
   by?: string
+  /** 永久除名（只有「永久删除」才会写）：作者再提交也不会回到复审队列 */
+  permanent?: boolean
 }
 
 export interface SyncState {
@@ -138,6 +143,16 @@ export interface QueueItem {
   status: QueueStatus
   decisionAction: string
   reason: string
+  /** 上次审核结论（来自索引仓库 moderation 或本机决定），重新提交时用来展示「为什么曾被拒」 */
+  previousAction: string
+  previousReason: string
+  previousAt: string
+  /** 永久除名：为 true 时作者重新提交也不进入复审队列 */
+  permanent: boolean
+  /** 本次判为「重新提交」的依据（作者更新了版本 / 来源重新登记） */
+  resubmitNote: string
+  /** 无人值守下是否允许自动复审这条重新提交（历史结论必须能靠自动检查重新验证） */
+  autoResubmit: boolean
   checks: CheckItem[]
   /** 是否来自索引仓库的完整条目（false = 只有 id / source 的残缺条目） */
   complete: boolean
@@ -212,6 +227,7 @@ export interface RepoCheck {
 export interface QueueStats {
   total: number
   pending: number
+  resubmitted: number
   published: number
   rejected: number
   delisted: number
@@ -251,6 +267,7 @@ export const CHECK_LABELS: Record<string, string> = {
 
 export const QUEUE_STATUS_LABELS: Record<QueueStatus, string> = {
   pending: "待收录",
+  resubmitted: "重新提交",
   published: "已上架",
   rejected: "未通过",
   delisted: "已下架",
@@ -266,6 +283,12 @@ export interface QueueFilterOption {
 
 export const QUEUE_FILTERS: QueueFilterOption[] = [
   { value: "pending", label: "待收录", hint: "在收录名单里、索引仓库还没有的条目", tone: "default" },
+  {
+    value: "resubmitted",
+    label: "重新提交",
+    hint: "作者更新了曾被拒绝或已下架的 MOD 并重新提交，需要复审",
+    tone: "warn",
+  },
   { value: "warn", label: "有警告", hint: "自动检查有需留意项，无人值守不会收录", tone: "warn" },
   { value: "fail", label: "检查不通过", hint: "存在硬性检查失败项，建议拒绝收录", tone: "danger" },
   { value: "offline", label: "仓库失联", hint: "巡检找不到对应仓库，需要人工确认", tone: "danger" },
@@ -285,6 +308,31 @@ export const QUICK_REJECT_REASONS = [
   "id 已被占用",
   "密钥与 author.id 不一致",
 ]
+
+/**
+ * 无人值守可以自动复审的历史结论：这些理由都能被队列里的自动检查原样复核
+ * （清单完整性 / 包体位置 / 分类 / id 唯一 / 密钥绑定），作者改了就能看到。
+ *
+ * 刻意不含「仓库不属于作者」：那条结论是 PR 作者身份层面的判断（自动合并工作流按
+ * PR 作者比对仓库 owner），控制台侧的 repo_ownership 只校验 manifest.repo 与来源一致，
+ * 重新提交绕得过去 —— 所以必须人工复审。
+ * 判断类理由（抄袭、恶意代码、功能不合规）同理，自动检查看不出来。
+ */
+export const AUTO_REVIEWABLE_REASONS = [
+  "manifest 字段缺失",
+  "sha256 不合法",
+  "ZIP 不在作者 Release",
+  "分类非法",
+  "id 已被占用",
+  "密钥与 author.id 不一致",
+]
+
+export function isAutoReviewableReason(reason: string): boolean {
+  const text = (reason || "").trim()
+  if (!text) return false
+  if (AUTO_REVIEWABLE_REASONS.some((item) => text === item)) return true
+  return text.includes("失联")
+}
 
 /** 索引仓库允许的分类（英文为规范名，中文为仓库里实际使用的写法） */
 export const CATEGORY_ALLOWLIST = [
@@ -380,9 +428,9 @@ export function bulkActionAllowed(item: QueueItem, action: DecisionAction): bool
   if (item.deleted) return action === "delete"
   switch (action) {
     case "approve":
-      return item.status === "pending"
+      return item.status === "pending" || item.status === "resubmitted"
     case "reject":
-      return item.status === "pending" || item.status === "rejected"
+      return item.status === "pending" || item.status === "rejected" || item.status === "resubmitted"
     case "delist":
       return item.status === "published" || item.status === "pending"
     case "restore":
@@ -394,6 +442,21 @@ export function bulkActionAllowed(item: QueueItem, action: DecisionAction): bool
     case "delete":
       return item.status !== "published"
   }
+}
+
+/**
+ * 无人值守自动放行的统一口径（概览计数与实际自动收录共用这一份，免得两边走偏）：
+ * - 待收录：自动检查全部通过且仓库没失联
+ * - 重新提交：在上面基础上再加一条 —— 历史结论必须能靠自动检查重新验证
+ *   （作者补齐 manifest、修正包体位置这类问题才自动放行；
+ *   仓库归属、抄袭这类自动检查看不出的理由必须人工复审）
+ */
+export function autoApproveEligible(item: QueueItem): boolean {
+  if (item.deleted) return false
+  const statusOk = item.status === "pending" || (item.status === "resubmitted" && item.autoResubmit)
+  if (!statusOk) return false
+  if (item.repoAlive === false) return false
+  return item.checks.length > 0 && summarizeChecks(item.checks) === "pass"
 }
 
 export function formatBytes(bytes: number): string {
@@ -666,6 +729,12 @@ function emptyItem(): Omit<
     publishedAt: "",
     repoAlive: null,
     lastCheckAt: "",
+    previousAction: "",
+    previousReason: "",
+    previousAt: "",
+    permanent: false,
+    resubmitNote: "",
+    autoResubmit: false,
     manifestFromSource: false,
     inspectStatus: "idle",
     inspectNote: "",
@@ -853,6 +922,59 @@ function overlayStatus(base: QueueStatus, action: string): QueueStatus {
 interface DecisionLike {
   action: string
   reason_zh: string
+  /** 决定落下的时间，用来判断「索引仓库里的旧结论」和「本机新决定」谁更新 */
+  at: string
+}
+
+/**
+ * 本机决定与索引仓库里的结论是同一条时，只叠加一次。
+ * 否则「作者重新提交」会被那条已经生效的旧结论重新压回未通过 ——
+ * 这正是「作者更新后重新提交却永远进不了待收录」的根因。
+ */
+function isSameDecision(local: DecisionLike | undefined, entry: SyncModeration | undefined): boolean {
+  if (!local || !entry?.action) return false
+  if (local.action !== entry.action) return false
+  return (local.at || "") <= (entry.at || "")
+}
+
+/** 把上次审核结论挂到条目上：重新提交时界面要能直接说出「当初为什么没通过」 */
+function withModeration(
+  item: QueueItem,
+  entry: SyncModeration | undefined,
+  permanent = false,
+): QueueItem {
+  if (!entry?.action && !permanent) return item
+  const previousReason = entry?.reason?.zh || item.previousReason
+  const isPermanent = permanent || entry?.permanent === true
+  return {
+    ...item,
+    previousAction: entry?.action || item.previousAction,
+    previousReason,
+    previousAt: entry?.at || item.previousAt,
+    permanent: isPermanent,
+    autoResubmit:
+      item.status === "resubmitted" && !isPermanent && isAutoReviewableReason(previousReason),
+  }
+}
+
+/** 叠加审核结论：索引仓库的结论在前，本机更新的决定在后（同一条只算一次） */
+function mergeReviewState(
+  item: QueueItem,
+  entry: SyncModeration | undefined,
+  local: DecisionLike | undefined,
+  permanent = false,
+): QueueItem {
+  let merged = item
+  const same = isSameDecision(local, entry)
+  if (entry?.action && !same) {
+    merged = withDecision(merged, {
+      action: entry.action,
+      reason_zh: entry.reason?.zh || "",
+      at: entry.at || "",
+    })
+  }
+  if (local && !same) merged = withDecision(merged, local)
+  return withModeration(merged, entry, permanent)
 }
 
 function withDecision(item: QueueItem, decision: DecisionLike | undefined): QueueItem {
@@ -926,9 +1048,43 @@ function buildQueue(
     covered.add(mod.id || "")
     covered.add(mod.source || "")
     const entry = moderationByKey.get(mod.id || "") ?? moderationByKey.get(mod.source || "")
-    const merged = withDecision(item, entry?.action ? { action: entry.action, reason_zh: entry.reason?.zh || "" } : undefined)
-    const decided = decisionByTarget.get(merged.target)
-    items.push(withDecision(merged, decided))
+    let merged = mergeReviewState(item, entry, decisionByTarget.get(item.target))
+    // 已下架 + 作者仓库里的清单版本比索引里新 = 作者更新后重新提交，回到复审队列
+    if (merged.status === "delisted" && mod.source) {
+      const fresh = inspections[mod.source]?.manifest
+      const nextVersion = fresh?.version || ""
+      if (fresh && nextVersion && mod.version && nextVersion !== mod.version) {
+        const freshMod: SyncMod = {
+          ...fresh,
+          id: fresh.id || mod.id,
+          source: mod.source,
+          repo: fresh.repo || mod.repo,
+        }
+        merged = {
+          ...merged,
+          status: "resubmitted",
+          version: nextVersion,
+          displayName: fresh.displayName || merged.displayName,
+          category: fresh.category || merged.category,
+          description: fresh.description || merged.description,
+          changelog: fresh.changelog || merged.changelog,
+          sha256: fresh.sha256 || merged.sha256,
+          sizeBytes: Number(fresh.sizeBytes) > 0 ? Number(fresh.sizeBytes) : merged.sizeBytes,
+          tags: Array.isArray(fresh.tags) ? fresh.tags.filter((t) => Boolean(t)) : merged.tags,
+          downloadUrls: (Array.isArray(fresh.downloadUrls) ? fresh.downloadUrls : [])
+            .map((u) => ({
+              mirror: u?.mirror || "",
+              url: u?.url || "",
+              priority: Number(u?.priority) || 0,
+            }))
+            .filter((u) => Boolean(u.url)),
+          checks: buildChecks(freshMod, idCounts, keyIdsByAuthor),
+          resubmitNote: `作者已更新 v${mod.version} → v${nextVersion}，复审通过后新版本才会生效`,
+          autoResubmit: false,
+        }
+      }
+    }
+    items.push(merged)
   }
 
   // 规则 3：不在 mods 里但被拒绝收录的条目
@@ -939,9 +1095,21 @@ function buildQueue(
     if (!key || covered.has(key) || moderationSeen.has(key)) continue
     moderationSeen.add(key)
     if (value.action !== "reject") continue
-    const item = toPartialItem(key, "rejected", value.reason?.zh || "", ctx)
     covered.add(key)
-    items.push(withDecision(item, decisionByTarget.get(item.target)))
+    const local = decisionByTarget.get(key)
+    // 永久删除是终局结论：作者重新提交也不复审（delete 决定 / permanent 标记任一命中）
+    const permanent = value.permanent === true || local?.action === "delete"
+    // 重新提交的信号：来源级拒绝会同时把来源从 sources.json 移除，
+    // 它又出现在收录名单里，说明有人重新登记过这个模组 → 回到复审队列
+    const reRegistered =
+      !permanent &&
+      (value.source !== undefined || key.includes("/")) &&
+      sources.some((s) => (s || "").trim().toLowerCase() === key.trim().toLowerCase())
+    const base = toPartialItem(key, reRegistered ? "resubmitted" : "rejected", value.reason?.zh || "", ctx)
+    const item = reRegistered
+      ? { ...base, resubmitNote: "来源已重新登记进收录名单，等待复审本次提交" }
+      : base
+    items.push(mergeReviewState(item, value, local, permanent))
   }
 
   // 规则 4：在收录名单里、但既不在 mods 也不在 moderation 里 —— 待收录
@@ -1147,7 +1315,11 @@ export function useHome() {
     )
     for (const d of sorted) {
       if (!d.target) continue
-      map.set(d.target, { action: d.action, reason_zh: d.reason_zh || "" })
+      map.set(d.target, {
+        action: d.action,
+        reason_zh: d.reason_zh || "",
+        at: d.decided_at || d.created || "",
+      })
     }
     for (const [target, value] of Object.entries(localDecisions)) {
       map.set(target, value)
@@ -1203,9 +1375,10 @@ export function useHome() {
     const kw = keyword.trim().toLowerCase()
     const order: Record<QueueStatus, number> = {
       pending: 0,
-      rejected: 1,
-      delisted: 2,
-      published: 3,
+      resubmitted: 1,
+      rejected: 2,
+      delisted: 3,
+      published: 4,
     }
     const matched = visibleItems.filter((item) => {
       if (!matchesQueueFilter(item, filterStatus)) return false
@@ -1250,22 +1423,17 @@ export function useHome() {
 
   const stats = useMemo<QueueStats>(() => {
     const count = (s: QueueStatus) => queueItems.filter((i) => i.status === s).length
-    // 自动放行只作用于「待收录」：未通过是维护者明确拒过的，永远不自动放行
-    const eligible = (i: QueueItem) =>
-      i.status === "pending" &&
-      i.checks.length > 0 &&
-      summarizeChecks(i.checks) === "pass" &&
-      i.repoAlive !== false
     return {
       total: queueItems.length,
       pending: count("pending"),
+      resubmitted: count("resubmitted"),
       published: count("published"),
       rejected: count("rejected"),
       delisted: count("delisted"),
       warn: countQueueFilter(queueItems, "warn"),
       fail: countQueueFilter(queueItems, "fail"),
       offline: countQueueFilter(queueItems, "offline"),
-      autoEligible: queueItems.filter(eligible).length,
+      autoEligible: queueItems.filter(autoApproveEligible).length,
       deleted: deletedItems.length,
     }
   }, [queueItems, deletedItems])
@@ -1425,7 +1593,7 @@ export function useHome() {
     (item: QueueItem, action: DecisionAction, reasonText: string) => {
       setLocalDecisions((prev) => ({
         ...prev,
-        [item.target]: { action, reason_zh: reasonText },
+        [item.target]: { action, reason_zh: reasonText, at: nowIso() },
       }))
     },
     [],
@@ -1473,7 +1641,11 @@ export function useHome() {
         await writeReviewRecord(
           item,
           auto ? "auto_approve" : "approve",
-          auto ? "自动检查全部通过，无警告项" : "核对索引仓库资料后收录通过",
+          auto
+            ? item.status === "resubmitted"
+              ? "重新提交复审：自动检查全部通过"
+              : "自动检查全部通过，无警告项"
+            : "核对索引仓库资料后收录通过",
           modeValue,
         )
         applyLocalDecision(item, "approve", "")
@@ -1859,8 +2031,15 @@ export function useHome() {
     if (Date.now() < apiCooldownRef.current) return
     const candidates: Array<{ source: string; at: number }> = []
     for (const item of queueItems) {
-      if (item.complete || !item.source) continue
-      if (item.status !== "pending" && item.status !== "rejected") continue
+      if (!item.source) continue
+      // 残缺条目要体检补全；已下架的要体检比对作者是否更新了版本（更新了就该退回复审）
+      const wanted =
+        (!item.complete &&
+          (item.status === "pending" ||
+            item.status === "rejected" ||
+            item.status === "resubmitted")) ||
+        item.status === "delisted"
+      if (!wanted) continue
       if (inspectTriedRef.current.has(item.source)) continue
       candidates.push({ source: item.source, at: sourceInspections[item.source]?.at ?? 0 })
     }
@@ -2034,14 +2213,8 @@ export function useHome() {
 
   useEffect(() => {
     if (loading || mode !== "auto") return
-    // 「未通过」的条目由维护者明确拒过，只能人工点「恢复上架」，这里永不自动放行
-    const eligible = queueItems.filter(
-      (i) =>
-        i.status === "pending" &&
-        i.checks.length > 0 &&
-        summarizeChecks(i.checks) === "pass" &&
-        i.repoAlive !== false,
-    )
+    // 「未通过」不自动放行，只能人工复审；「重新提交」只有历史理由能靠自动检查重新验证时才放行
+    const eligible = queueItems.filter(autoApproveEligible)
     const fresh = eligible.filter((i) => !autoTriedRef.current.has(i.target))
     if (fresh.length === 0) return
     void runAutoApprove(fresh)
@@ -2187,7 +2360,13 @@ export function useHome() {
   const selectItem = useCallback((item: QueueItem) => {
     setSelectedKey(item.key)
     setReason("")
-    setActionKind(item.status === "published" || item.status === "delisted" ? "delist" : "approve")
+    setActionKind(
+      item.status === "published" || item.status === "delisted"
+        ? "delist"
+        : item.status === "resubmitted" && item.previousAction === "delist"
+          ? "restore"
+          : "approve",
+    )
   }, [])
 
   const openRecords = useCallback(

@@ -21,7 +21,7 @@ const MODES: Array<{ value: ReviewMode; label: string; hint: string }> = [
   {
     value: "auto",
     label: "无人值守",
-    hint: "检查全部通过且无警告的待收录条目自动收录；未通过的不自动放行",
+    hint: "检查全部通过的待收录条目自动收录；重新提交的条目只在理由能被自动检查复核时自动复审；未通过的不自动放行",
   },
   { value: "manual", label: "人工审核", hint: "每条来源都需要维护者确认后才会收录" },
 ]

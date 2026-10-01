@@ -725,6 +725,8 @@ type ModerationEntry = {
   reason: { zh: string; en: string }
   at: string
   by: string
+  /** 永久除名标记：作者重新提交也不复审，只有「永久删除」会写 */
+  permanent?: boolean
 }
 
 type RepoFile = { ok: boolean; status: number; sha: string; json: Record<string, unknown> | null }
@@ -961,6 +963,7 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
         },
         at: typeof item.at === "string" ? item.at : "",
         by: typeof item.by === "string" ? item.by : "",
+        ...(item.permanent === true ? { permanent: true } : {}),
       })
     }
   }
@@ -1010,7 +1013,15 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
         String(d.reason_zh === undefined ? "" : d.reason_zh).trim() || "维护者已永久删除该条目"
       const en = String(d.reason_en === undefined ? "" : d.reason_en).trim() || zh
       entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
-      entries.push({ target: target, kind: kind, action: "reject", reason: { zh: zh, en: en }, at: at, by: by })
+      entries.push({
+        target: target,
+        kind: kind,
+        action: "reject",
+        reason: { zh: zh, en: en },
+        at: at,
+        by: by,
+        permanent: true,
+      })
       if (kind === "source") {
         const before = list.length
         list = list.filter((x) => x.toLowerCase() !== target.toLowerCase())

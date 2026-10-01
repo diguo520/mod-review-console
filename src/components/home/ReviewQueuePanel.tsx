@@ -260,6 +260,19 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                         {item.deletedAt ? ` · ${formatRelative(item.deletedAt)}` : ""}
                       </p>
                     ) : null}
+                    {!item.deleted && item.status === "resubmitted" ? (
+                      <p className="mt-1.5 text-xs text-foreground/80">
+                        <span className="font-medium">待复审：</span>
+                        {item.resubmitNote || "作者重新提交，等待复审"}
+                        {item.previousReason ? `（上次结论：${item.previousReason}）` : ""}
+                      </p>
+                    ) : null}
+                    {!item.deleted && item.status === "rejected" && item.permanent ? (
+                      <p className="mt-1.5 text-xs text-destructive/90">
+                        已永久除名：作者再次提交也不会自动复审
+                        {item.previousReason ? `（${item.previousReason}）` : ""}
+                      </p>
+                    ) : null}
                   </button>
                 </li>
               )

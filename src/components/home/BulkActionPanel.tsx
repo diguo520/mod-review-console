@@ -25,8 +25,8 @@ const BULK_ACTIONS: Array<{
   danger: boolean
   hint: string
 }> = [
-  { value: "approve", icon: CheckCircle2, danger: false, hint: "只处理「待收录」" },
-  { value: "reject", icon: Ban, danger: true, hint: "处理「待收录 / 未通过」" },
+  { value: "approve", icon: CheckCircle2, danger: false, hint: "处理「待收录 / 重新提交」" },
+  { value: "reject", icon: Ban, danger: true, hint: "处理「待收录 / 未通过 / 重新提交」" },
   { value: "delist", icon: Trash2, danger: true, hint: "处理「已上架 / 待收录」" },
   { value: "restore", icon: RotateCcw, danger: false, hint: "处理已有审核结论的条目" },
   { value: "delete", icon: Eraser, danger: true, hint: "永久剔除：已上架的先下架" },
