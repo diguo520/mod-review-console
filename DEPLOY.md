@@ -404,7 +404,7 @@ SESSION_SECRET="dev-only-secret-at-least-32-chars-long"
 ```
 前端审核动作 ─┬─→ D1 mod_decisions (applied = 0)
              │
-cron Worker ─┘ (每 10 分钟, */10 * * * *, 见 cron/)
+cron Worker ─┘ (每 30 分钟, */30 * * * *, 见 cron/)
              │
              └─→ POST https://<站点>/api/pb/api/index/sync   (头: x-index-sync-token)
                    · 取 applied = 0 的决定, 重放出 sources.json / moderation.json
@@ -425,7 +425,7 @@ npx wrangler deploy --config cron/wrangler.toml
 npx wrangler secret put INDEX_SYNC_TOKEN --config cron/wrangler.toml
 ```
 
-第一句输出里应看到 `schedule: */10 * * * *`。换域名改 `cron/wrangler.toml` 的
+第一句输出里应看到 `schedule: */30 * * * *`。换域名改 `cron/wrangler.toml` 的
 `SYNC_URL`，再跑一次 `wrangler deploy`。
 
 ### 11.3 验证「无人值守」真的成立
@@ -488,7 +488,7 @@ wrangler pages functions build --outdir=$env:TEMP/fnbuild
 
 新增:
 
-- `cron/wrangler.toml`、`cron/src/index.js` —— Cloudflare 定时任务 Worker（每 10 分钟调一次同步接口）
+- `cron/wrangler.toml`、`cron/src/index.js` —— Cloudflare 定时任务 Worker（每 30 分钟调一次同步接口）
 - `DEPLOY.md` 第 11 节、`README.md`「零机器依赖」一节
 
 修改（`functions/api/pb/[[path]].ts`）:

@@ -54,7 +54,7 @@
             └─ 读写 → D1 (review_records / delete_records / repo_checks / mod_decisions)
                  └─ 审核结论回写索引仓库 → 仓库自己的 Actions 重建+签名 → docs/mod-index.json
 
-Cloudflare 定时任务 (cron/ 目录, 每 10 分钟)
+Cloudflare 定时任务 (cron/ 目录, 每 30 分钟)
   └─ 调 POST /api/pb/api/index/sync → 同上；没人开页面也会同步
 ```
 
@@ -80,7 +80,7 @@ Cloudflare 定时任务 (cron/ 目录, 每 10 分钟)
 | 审核流水 / 处置留档 / 巡检结果 | Cloudflare D1 | 无 |
 | 审核结论回写索引仓库 | Pages Function `POST /api/pb/api/index/sync` | 无 |
 | 索引重建 + 签名 | 索引仓库 GitHub Actions（私钥只在 Actions Secret 里） | 无 |
-| **定期触发上面那步** | **`cron/` 里的 Cloudflare 定时任务，每 10 分钟** | 无 |
+| **定期触发上面那步** | **`cron/` 里的 Cloudflare 定时任务，每 30 分钟** | 无 |
 
 ```
 前端动作（或定时任务）
@@ -93,6 +93,27 @@ Cloudflare 定时任务 (cron/ 目录, 每 10 分钟)
       · 用 INDEX_SIGNING_KEY 签名 → 提交 docs/mod-index.json
   → 启动器读取
 ```
+
+### 作者重复提交 / 集中大量提交
+
+作者端网络重试可能把同一次投稿开出两条 PR，热门时段也可能一次涌进来很多作者。这两种情况都不需要
+维护者盯着：
+
+- **重复 PR 自动关闭**：索引仓库的 `auto-merge-submissions` 会识别「没有新增来源、且它带的
+  `mods/*.json` 与 main 逐字节一致」的重复 PR —— 留言并关闭，不重复收录、也不再触发一次索引重建。
+- **`sources.json` 构建时去重**：`build-index.mjs` 每次构建都会去空白、丢掉格式非法的条目、
+  按不区分大小写去重（保留第一次出现的写法与顺序），有改动就提交回去，重试不会留下重复项。
+- **索引重建串行化**：`build-index.yml` 的 `concurrency: build-index` 让集中提交排队跑，
+  不会两个重建同时改 `docs/mod-index.json` 互相踩。
+- **单作者洪泛闸**：非维护者账号同时挂着的 open PR 超过 `MAX_OPEN_PER_AUTHOR`（默认 10，填 0 关闭）
+  时暂停自动合并、转人工。
+- **控制台侧**：队列可按状态 / 问题筛选，支持「全选本页」与「全选筛选结果」（跨页）后批量处理；
+  批量操作逐条执行，单条失败不打断整批，最后统一报数。
+- **总开关**：索引仓库 Variable `AUTO_MERGE_SUBMISSIONS=off` 可随时把自动合并降级成「只校验 + 留言」。
+
+**重点**：正常的新投稿是「PR 自动合并 → Actions 重建 → 启动器可见」，本来就不经过控制台，
+所以集中大量提交不会堵住收录；控制台要处理的只有「需要人判断」的那些（重新提交、检查不通过、
+仓库失联）。重复提交与洪泛也都有上面的自动兜底，不会丢数据 —— 被拦下的 PR 仍在 GitHub 的 PR 列表里。
 
 定时任务 Worker 只需部署一次：
 
