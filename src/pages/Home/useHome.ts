@@ -16,13 +16,14 @@ export type ReviewMode = "auto" | "manual"
 export type QueueStatus = "pending" | "resubmitted" | "published" | "rejected" | "delisted"
 /** 审核动作：收录通过 / 拒绝收录 / 下架 / 恢复上架 / 永久删除 */
 export type DecisionAction = "approve" | "reject" | "delist" | "restore" | "delete"
-/** 能落到 mod_decisions 的动作：永久删除也要写决定，同步时据此把条目从索引仓库剔除 */
+/** 能落到 mod_decisions 的动作：永久删除也要写决定，同步时据此把条目彻底从索引仓库移除 */
 export type DecisionWriteAction = DecisionAction
 /** 问题筛选：按体检结论挑条目 —— 大规模审核时先处理这三类最要紧 */
 export type QueueIssueFilter = "warn" | "fail" | "offline"
 /**
- * 队列筛选：状态 + 问题 + 全部 + 已删除留档。
- * deleted 是只读回收站视图：条目已经退出工作队列，只在这里回溯。
+ * 队列筛选：状态 + 问题 + 全部 + 已删除。
+ * deleted 只是「删除决定已写入、还没同步完」的过渡态：同步完成后条目会从索引仓库彻底
+ * 消失（不留黑名单），这里也就不再有留档可看。
  */
 export type QueueFilter = "all" | "deleted" | QueueStatus | QueueIssueFilter
 
@@ -67,7 +68,10 @@ export interface SyncModeration {
   reason?: { zh?: string; en?: string }
   at?: string
   by?: string
-  /** 永久除名（只有「永久删除」才会写）：作者再提交也不会回到复审队列 */
+  /**
+   * 历史数据里的永久除名标记（旧版「永久删除」写的）。新逻辑不再写它，也不留黑名单：
+   * 删除会把条目从索引仓库彻底移除，作者重新发布提交就是一次全新的收录。
+   */
   permanent?: boolean
 }
 
@@ -147,7 +151,7 @@ export interface QueueItem {
   previousAction: string
   previousReason: string
   previousAt: string
-  /** 永久除名：为 true 时作者重新提交也不进入复审队列 */
+  /** 已被删除：同步完成后条目会从队列里消失（索引仓库不留黑名单，作者可重新提交） */
   permanent: boolean
   /** 本次判为「重新提交」的依据（作者更新了版本 / 来源重新登记） */
   resubmitNote: string
@@ -158,9 +162,9 @@ export interface QueueItem {
   complete: boolean
   repoAlive: boolean | null
   lastCheckAt: string
-  /** 已被单独删除：删除后的条目退出工作队列，只在「已删除 / 全部」里留档查看 */
+  /** 已被删除：删除决定已写入、还没同步完，这期间条目仍留在「已删除」筛选里 */
   deleted: boolean
-  /** 删除留档的理由与时间 */
+  /** 删除的理由与时间 */
   deletedReason: string
   deletedAt: string
   /** 资料是否来自来源仓库的清单文件（该来源尚未收录进索引） */
@@ -235,7 +239,7 @@ export interface QueueStats {
   fail: number
   offline: number
   autoEligible: number
-  /** 已删除留档的条数（不参与工作队列统计） */
+  /** 删除决定还没同步完的条数（不参与工作队列统计） */
   deleted: number
 }
 
@@ -298,10 +302,10 @@ export const QUEUE_FILTERS: QueueFilterOption[] = [
   {
     value: "deleted",
     label: "已删除",
-    hint: "已单独删除并从索引里剔除；这里只做回溯，不参与统计、体检与批量操作",
+    hint: "删除决定已写入、正在等同步的过渡态；同步完成后条目会从索引仓库彻底消失，这里不会再留档",
     tone: "muted",
   },
-  { value: "all", label: "全部", hint: "工作队列全部条目（含已删除留档）", tone: "default" },
+  { value: "all", label: "全部", hint: "工作队列全部条目", tone: "default" },
 ]
 
 export const QUICK_REJECT_REASONS = [
@@ -372,7 +376,11 @@ export const DECISION_ACTIONS: Array<{ value: DecisionAction; label: string; hin
   { value: "reject", label: "拒绝收录", hint: "必填理由，并从收录名单移除" },
   { value: "delist", label: "下架", hint: "必填理由，索引保留但标记为已下架" },
   { value: "restore", label: "恢复上架", hint: "撤销之前对该条目的审核结果" },
-  { value: "delete", label: "永久删除", hint: "必填理由：从索引仓库剔除该条目，已上架必须先下架" },
+  {
+    value: "delete",
+    label: "永久删除",
+    hint: "必填理由：从收录名单与索引仓库里彻底移除该条目，并清掉审核记录（不留黑名单），已上架必须先下架",
+  },
 ]
 
 export function summarizeChecks(items: CheckItem[] | null): CheckStatus {
@@ -427,7 +435,7 @@ export const BULK_REASON_REQUIRED: DecisionAction[] = ["reject", "delist", "dele
  * - 拒绝收录：只作用于「待收录 / 未通过」（已上架的不能整批从索引里抹掉）
  * - 下架：作用于「已上架 / 待收录」（待收录按清理处理，与「清理失联」一致）
  * - 恢复上架：只作用于存在审核结果的条目
- * - 删除：已上架的一律跳过，必须先下架；已删除留档的条目只允许再删一次（补剔除索引）
+ * - 删除：已上架的一律跳过，必须先下架；已删除但还没同步完的条目只允许再删一次（补同步）
  */
 export function bulkActionAllowed(item: QueueItem, action: DecisionAction): boolean {
   if (item.deleted) return action === "delete"
@@ -998,7 +1006,7 @@ function withDecision(item: QueueItem, decision: DecisionLike | undefined): Queu
   return { ...item, status, decisionAction: decision.action, reason }
 }
 
-/** 删除留档：从下架记录里聚合出来的「已删除」条目，key = mod_id */
+/** 删除标记：从处置留档里聚合出来的「已删除」条目，key = mod_id */
 export interface DeletionInfo {
   reason: string
   at: string
@@ -1102,7 +1110,8 @@ function buildQueue(
     if (value.action !== "reject") continue
     covered.add(key)
     const local = decisionByTarget.get(key)
-    // 永久删除是终局结论：作者重新提交也不复审（delete 决定 / permanent 标记任一命中）
+    // 已删除的条目在同步完成前仍会短暂出现在队列里：这期间作者重新提交也先不复审
+    // （delete 决定 / 旧数据里的 permanent 标记任一命中），免得同步那几秒里被重新上架
     const permanent = value.permanent === true || local?.action === "delete"
     // 重新提交的信号：来源级拒绝会同时把来源从 sources.json 移除，
     // 它又出现在收录名单里，说明有人重新登记过这个模组 → 回到复审队列
@@ -1126,7 +1135,7 @@ function buildQueue(
     items.push(withDecision(item, decisionByTarget.get(item.target)))
   }
 
-  // 删除留档叠加：删除后的条目不是「查不到」，而是退出工作队列
+  // 删除标记叠加：删除决定写下去之后，条目要等索引同步完成才会真正消失
   if (deletedByModId.size === 0) return items
   return items.map((item) => {
     const hit = deletedByModId.get(item.modId || item.source)
@@ -1332,7 +1341,7 @@ export function useHome() {
     return map
   }, [decisions, localDecisions])
 
-  /** 处置留档里标记为「已删除」的条目（key = mod_id） */
+  /** 处置留档里标记为「已删除」的条目（key = mod_id）；同步完成后它们不再有对应条目 */
   const deletedByModId = useMemo(() => {
     const map = new Map<string, DeletionInfo>()
     for (const row of deleteRecords) {
@@ -1560,9 +1569,9 @@ export function useHome() {
       item: QueueItem,
       action: DecisionWriteAction,
       reasonText: string,
-      options?: { decisionId?: string },
+      options?: { decisionId?: string; targetOverride?: string },
     ) => {
-      const target = item.target
+      const target = options?.targetOverride || item.target
       let decisionId = options?.decisionId || ""
       if (!decisionId) {
         const existing = await apiGet<ListResponse<ModDecision>>(
@@ -1630,10 +1639,16 @@ export function useHome() {
       const decisionId = decisionIdByTarget.get(item.target)
 
       if (action === "delete") {
-        // 永久删除：写一条 delete 决定，同步时索引仓库会据此把条目剔除
-        // （来源级连 sources.json 里的来源一起移除），同时写处置留档让条目退出工作队列。
-        // 对已经留档的条目再点一次是幂等的，正好用来补同步。
+        // 永久删除：写一条 delete 决定，同步时索引仓库会据此把条目彻底移除 ——
+        // 来源从 sources.json 移除，它在 moderation.json 里的记录也一并清掉（不留黑名单），
+        // 同时写处置留档让条目退出工作队列。重复删除是幂等的，正好用来补同步。
         await submitDecision(item, "delete", reasonText, { decisionId })
+        // 同一条目在 moderation.json 里可能同时挂着「来源」和「id」两个键（比如先按 id
+        // 下架、再来删整个来源）。只清来源会留下一条指向已删条目的死记录，索引重建后审核台
+        // 又会把它当「已下架 / 未通过」捞回来，所以有 modId 时再补一条 id 级的删除决定。
+        if (item.modId && item.modId !== item.target) {
+          await submitDecision(item, "delete", reasonText, { targetOverride: item.modId })
+        }
         await writeReviewRecord(item, "delete", reasonText, modeValue)
         await writeDeleteRecord(item, "delete", reasonText)
         applyLocalDecision(item, "delete", reasonText)
@@ -1792,7 +1807,8 @@ export function useHome() {
   )
 
   /**
-   * 永久删除单条 MOD：同步时索引仓库会把它剔除（来源级连 sources.json 里的来源一起移除）。
+   * 永久删除单条 MOD：同步时索引仓库会把它彻底移除 —— 来源从 sources.json 移除，
+   * moderation.json 里也不留黑名单，作者想回来就重新发布提交（那是一次全新的收录）。
    * 规则：未上架的可以直接删；已上架的必须先下架，再回来删 ——
    * 让「下架」和「删除」分成两步，删除这种不可逆的动作就永远有一步缓冲。
    */
@@ -1820,7 +1836,10 @@ export function useHome() {
           next.delete(item.key)
           return next
         })
-        setToast({ kind: "ok", text: `已永久删除《${itemLabel(item)}》，索引仓库会同步剔除该条目` })
+        setToast({
+          kind: "ok",
+          text: `已永久删除《${itemLabel(item)}》，索引仓库会同步彻底移除该条目（不留黑名单）`,
+        })
         return true
       } catch {
         setToast({ kind: "error", text: "删除未成功，请重试" })
@@ -2037,7 +2056,7 @@ export function useHome() {
     const candidates: Array<{ source: string; at: number }> = []
     for (const item of queueItems) {
       if (!item.source) continue
-      // 删除留档已经退出工作队列（queueItems 本身也过滤了），这里再兜一层，别去烧额度
+      // 删除过、还在等同步的条目不会再上架，这里再兜一层，别去烧抓取额度
       if (item.deleted) continue
       // 只体检「能改变状态」的条目：
       //   pending / resubmitted —— 资料不全，补齐了才能审核；
@@ -2068,7 +2087,7 @@ export function useHome() {
   useEffect(() => {
     if (loading || mode !== "manual") return
     if (!selected || selected.complete || !selected.source) return
-    // 删除留档只做回溯，未通过的条目要等作者重新登记 —— 两者都不值得自动去拉清单
+    // 已删除的条目只在等同步，未通过的条目要等作者重新登记 —— 两者都不值得自动去拉清单
     if (selected.deleted || selected.status === "rejected") return
     if (selected.inspectStatus !== "idle") return
     void inspectSources([selected.source])

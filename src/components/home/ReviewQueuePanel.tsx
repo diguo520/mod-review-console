@@ -227,25 +227,15 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       {item.deleted ? (
-                        // 删除留档已经退出工作队列（不体检、不巡检、不进批量操作），
-                        // 所以不能再显示「待体检 / 信息不全」这种待办口吻的标签 —— 会让人
-                        // 以为它还在排队。这里明确标成已归档，永久除名的再补一枚终局标记。
-                        <>
-                          <span
-                            className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs text-secondary-foreground"
-                            title="已进入删除留档：不参与队列统计、体检与巡检，只在这里回溯"
-                          >
-                            已归档
-                          </span>
-                          {item.permanent ? (
-                            <span
-                              className="rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-1 text-xs text-destructive"
-                              title="永久除名：索引仓库的 moderation.json 里保留 permanent 标记，作者再次提交也不会复活"
-                            >
-                              永久除名
-                            </span>
-                          ) : null}
-                        </>
+                        // 删除的条目会从索引仓库彻底移除，同步完成后它就不再出现在队列里；
+                        // 这里显示的只是「决定已写入、还没同步完」的短暂过渡态。所以不能再显示
+                        // 「待体检 / 信息不全」这种待办口吻的标签，免得看着像还在排队。
+                        <span
+                          className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs text-secondary-foreground"
+                          title="删除决定已写入，正在同步到索引仓库；同步完成后这条会从队列里消失"
+                        >
+                          待同步
+                        </span>
                       ) : item.checks.length > 0 ? (
                         <CheckSummaryBadge status={summarizeChecks(item.checks)} />
                       ) : item.inspectStatus === "loading" ? (
@@ -278,8 +268,8 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                     </div>
                     {item.deleted ? (
                       <p className="mt-1.5 truncate text-xs text-muted-foreground">
-                        删除留档：{item.deletedReason || "未填写理由"}
-                        {item.deletedAt ? ` · ${formatRelative(item.deletedAt)}` : ""}
+                        已删除：{item.deletedReason || "未填写理由"}
+                        {item.deletedAt ? ` · ${formatRelative(item.deletedAt)}` : ""} · 待同步到索引仓库
                       </p>
                     ) : null}
                     {!item.deleted && item.status === "resubmitted" ? (
@@ -287,12 +277,6 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                         <span className="font-medium">待复审：</span>
                         {item.resubmitNote || "作者重新提交，等待复审"}
                         {item.previousReason ? `（上次结论：${item.previousReason}）` : ""}
-                      </p>
-                    ) : null}
-                    {!item.deleted && item.status === "rejected" && item.permanent ? (
-                      <p className="mt-1.5 text-xs text-destructive/90">
-                        已永久除名：作者再次提交也不会自动复审
-                        {item.previousReason ? `（${item.previousReason}）` : ""}
                       </p>
                     ) : null}
                   </button>

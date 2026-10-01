@@ -59,7 +59,8 @@ export function HomePage(p: ReturnType<typeof useHome>) {
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
               队列里的条目全部来自维护者索引仓库：核对资料与逐项自动检查后，决定收录通过、拒绝收录、
               下架、恢复上架或永久删除，拒绝、下架与删除都要写明理由。条目可以勾选后批量处理，
-              已上架的必须先下架才能删除。审核结论会自动回写索引仓库（永久删除会把条目从索引里剔除）；
+              已上架的必须先下架才能删除。审核结论会自动回写索引仓库（永久删除会把条目从收录名单与
+              索引里彻底移除，作者想再上架只能重新发布提交）；
               令牌只读时也可以用「导出」拿到 moderation.json 与 sources.json 自行提交。
             </p>
           </div>
@@ -243,7 +244,8 @@ export function HomePage(p: ReturnType<typeof useHome>) {
         <div className="rounded-lg border border-dashed border-border px-4 py-4 text-xs text-muted-foreground">
           每条审核结论都会写入审核记录，拒绝收录、下架与删除另外写入处置记录，作者可据此修正后重新提交。
           作者更新了「未通过 / 已下架」的 MOD 并重新提交时，条目会自动回到「重新提交」队列等待复审；
-          只有「永久删除」是终局结论，重新提交也不会复活。
+          被永久删除的条目会从收录名单与索引里彻底移除、不留黑名单，作者想再上架只能重新发布提交
+          （那是一次全新的收录）。
           筛选按钮覆盖待收录、重新提交、有警告、检查不通过、仓库失联、已上架、未通过、已下架与已删除，
           按钮上的数字与筛选结果一致；勾选条目即可批量处理，不符合前置条件的会被跳过并如实报数。
           只有「待收录 / 重新提交」的残缺条目和「已下架」的条目会自动去来源仓库体检（每轮 3 个），

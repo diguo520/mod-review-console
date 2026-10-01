@@ -76,7 +76,7 @@ export function OfflineBadge({ className }: { className?: string }) {
   )
 }
 
-/** 已删除留档：条目已退出工作队列，只在「已删除 / 全部」筛选里可见 */
+/** 已删除：删除决定已写入、正在等同步；同步完成后条目会从队列里彻底消失 */
 export function DeletedBadge({ className }: { className?: string }) {
   return (
     <span

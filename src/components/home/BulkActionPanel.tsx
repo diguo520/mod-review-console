@@ -153,8 +153,8 @@ export function BulkActionPanel(p: BulkActionPanelProps) {
 
           {pendingAction === "delete" ? (
             <p className="text-xs text-destructive">
-              永久删除不可逆：这些条目会退出工作队列，并同步从索引仓库剔除（来源级的连收录名单
-              一起移除），之后只能在「已删除」筛选和操作记录里回溯。已上架的条目必须先下架再删。
+              永久删除不可逆：这些条目会退出工作队列，并同步从收录名单与索引仓库里彻底移除（审核记录
+              一并清掉，不留黑名单）。已上架的条目必须先下架再删；作者想再上架只能用启动器重新发布提交。
             </p>
           ) : null}
 

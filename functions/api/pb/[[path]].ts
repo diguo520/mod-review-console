@@ -1006,32 +1006,28 @@ async function indexSyncInner(env: Env, db: D1DatabaseLike, request: Request): P
         if (list.length !== before) notes.push("已从 sources.json 移除被拒绝的来源 " + target)
       }
     } else if (action === "delete") {
-      // 永久删除：把条目从索引仓库彻底剔除。build-index.mjs 只认 reject / delist 两个动作，
-      // 所以永久除名以 reject 落盘；来源级会顺手把 sources.json 里的来源也移除，
-      // 之后索引重建不会再抓它。对同一条目重复删除是幂等的，正好用来补同步。
-      const zh =
-        String(d.reason_zh === undefined ? "" : d.reason_zh).trim() || "维护者已永久删除该条目"
-      const en = String(d.reason_en === undefined ? "" : d.reason_en).trim() || zh
-      entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)
-      entries.push({
-        target: target,
-        kind: kind,
-        action: "reject",
-        reason: { zh: zh, en: en },
-        at: at,
-        by: by,
-        permanent: true,
-      })
+      // 彻底删除：把条目从索引仓库里完全抹掉 —— 来源从 sources.json 移除，
+      // 同时把它在 moderation.json 里的记录也删掉（**不留永久黑名单**）。
+      //
+      // 为什么不留：删除的典型场景是「仓库失联、作者跑路」，留一条黑名单既没用又会让
+      // 审核台一直挂着一个已死条目。作者真想回来，用启动器重新发布提交一次即可 ——
+      // 那是一次全新的投稿，走普通流程（PR → 自动合并 → 重建索引）。
+      //
+      // 目标可能以 id 或 source 两种键落盘，所以按 target 字面（不区分大小写）全清，
+      // 免得留下指向已删条目的旧记录。对同一条目重复删除是幂等的，正好用来补同步。
+      entries = entries.filter(
+        (e) => String(e.target).trim().toLowerCase() !== target.toLowerCase(),
+      )
       if (kind === "source") {
         const before = list.length
         list = list.filter((x) => x.toLowerCase() !== target.toLowerCase())
         notes.push(
           list.length !== before
-            ? "已从 sources.json 永久移除 " + target
-            : "sources.json 里本来就没有 " + target + "，只补写了永久除名记录",
+            ? "已从 sources.json 移除 " + target + "，并清掉它的审核记录"
+            : "sources.json 里本来就没有 " + target + "，只清掉了它的审核记录",
         )
       } else {
-        notes.push("已在 moderation.json 里永久除名 " + target)
+        notes.push("已清掉 " + target + " 的审核记录（不保留黑名单）")
       }
     } else if (action === "restore") {
       entries = entries.filter((e) => entryKey(e.target, e.kind) !== key)

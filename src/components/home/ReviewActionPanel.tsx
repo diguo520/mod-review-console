@@ -77,7 +77,7 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
   const summary = summarizeChecks(item.checks)
   // 已上架的条目不能直接删：先下架、再删除，删除这种不可逆的动作就永远有一步缓冲
   const deleteBlocked = item.status === "published"
-  // 已留档的条目仍允许再点一次「永久删除」：重复删除幂等，正好用来把索引仓库里漏掉的补剔除
+  // 已删除但还没同步完的条目仍允许再点一次「永久删除」：重复删除幂等，正好用来补同步
   const deletedRepair = item.deleted === true
   const reasonKind: "reject" | "delist" | "delete" | null =
     p.actionKind === "reject" || p.actionKind === "delist" || p.actionKind === "delete"
@@ -122,7 +122,7 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
 
       <p className="text-xs text-muted-foreground">
         {item.permanent
-          ? "这条已被永久除名：索引里不会收录它，作者再次提交也不会回到复审队列。"
+          ? "这条已被删除：索引仓库会把它彻底移除（不留黑名单），作者重新发布提交就是一次全新的收录。"
           : STATUS_HINT[item.status] ?? ""}
       </p>
 
@@ -146,15 +146,17 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
       {item.permanent ? (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          这条已被永久除名：作者再次提交也不会回到复审队列，除非先撤销这条决定。
+          这条已被删除：会从索引仓库彻底移除（不留黑名单），同步完成后不再出现在队列里。
+          作者以后用启动器重新发布提交，会作为一次全新的收录重新审核 —— 想反悔就在同步前撤销这条决定。
         </div>
       ) : null}
 
       {item.deleted ? (
         <p className="flex items-start gap-2 rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           <Eraser className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          这条已经删除并留档（{item.deletedReason || "未填写理由"}），不再参与审核与批量操作。
-          如果索引仓库里还留着它，选中「永久删除」再提交一次即可补剔除（重复删除是幂等的）。
+          这条已经删除（{item.deletedReason || "未填写理由"}），正在同步到索引仓库；同步完成后它会从
+          队列里消失，也不会再有「已删除留档」。同步一直没成功的话，再点一次「永久删除」即可补同步
+          （重复删除是幂等的）。
         </p>
       ) : null}
 
@@ -287,8 +289,8 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
           {deleteBlocked
             ? "这条已经上架，不能直接删除：先下架，确认无误后再回来删除。"
             : deletedRepair
-              ? "这条已经删除留档。再提交一次会重放永久删除决定，把索引仓库里剩余的记录也剔除掉。"
-              : "永久删除不可逆：条目会退出工作队列，并同步从索引仓库剔除（来源级的连收录名单一起移除），之后只能在「已删除」筛选与操作记录里回溯。"}
+              ? "这条已经删除，正在等同步。再提交一次会重放删除决定，把索引仓库里剩余的记录也清掉（重复删除是幂等的）。"
+              : "永久删除不可逆：条目会退出工作队列，并同步从收录名单与索引仓库里彻底移除（审核记录一并清掉，不留黑名单）。作者想再上架，只能用启动器重新发布、作为一次全新的收录提交。"}
         </p>
       ) : null}
     </section>

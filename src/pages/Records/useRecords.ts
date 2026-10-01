@@ -157,7 +157,7 @@ export const ACTION_HINTS: Record<RecordAction, string> = {
   auto_approve: "无人值守模式下自动放行",
   delist: "从市场撤下并留处置留档",
   restore: "撤销之前的审核结果，恢复上架",
-  delete: "彻底移出市场并留档，不可逆",
+  delete: "从收录名单与索引里彻底移除，不留黑名单，不可逆",
   repo_check: "周期确认作者仓库是否仍在线",
 }
 
@@ -507,7 +507,7 @@ export function useRecords() {
           action === "reject"
             ? "拒绝收录已留档，条目退回作者"
             : action === "delete"
-              ? "已单独删除并留档，条目退出工作队列"
+              ? "已彻底删除：来源从收录名单移除，审核记录一并清掉，条目退出工作队列"
               : "已从市场撤下",
         at: d.deleted_at || d.created,
         alive: null,

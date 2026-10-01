@@ -110,9 +110,8 @@ export function StatStrip({ stats, mode, autoPromotedCount }: StatStripProps) {
       ) : null}
       {stats.deleted > 0 ? (
         <p className="text-xs text-muted-foreground">
-          另有 {stats.deleted} 条已删除留档，不参与上面的统计；点筛选里的「已删除」可以回溯。
-          永久除名的条目会在索引仓库的 moderation.json 里保留一条 permanent 标记（作者再提交也不会复活），
-          所以留档会一直看得见。
+          另有 {stats.deleted} 条删除决定还没同步完，不参与上面的统计；点筛选里的「已删除」能看到它们。
+          同步会把这些条目从收录名单与索引仓库里彻底移除（不留黑名单），完成后它们就不再出现在队列里。
         </p>
       ) : null}
     </section>

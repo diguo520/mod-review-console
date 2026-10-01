@@ -98,7 +98,8 @@ export function ModDetailPanel({ mod, loading, onReinspect }: ModDetailPanelProp
 
       {mod.permanent ? (
         <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          已永久除名：作者再次提交也不会回到复审队列。
+          已删除：这条会从索引仓库彻底移除，同步完成后不再出现在队列里；作者以后用启动器重新发布提交，
+          会作为一次全新的收录重新审核。
         </p>
       ) : null}
 
