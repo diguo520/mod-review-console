@@ -105,7 +105,9 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
       <div className="flex items-start justify-between gap-2">
         <div>
           <h2 className="text-base font-semibold text-card-foreground">审核操作区</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">结论会写入审核流水，可导出后回本机重建索引</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            结论会写入审核流水并自动同步进索引仓库，不需要本机参与
+          </p>
         </div>
         {item.checks.length > 0 ? <CheckSummaryBadge status={summary} /> : null}
       </div>
@@ -118,7 +120,11 @@ export function ReviewActionPanel(p: ReviewActionPanelProps) {
         <p className="mt-0.5 break-all font-mono text-xs text-primary">{item.target}</p>
       </div>
 
-      <p className="text-xs text-muted-foreground">{STATUS_HINT[item.status] ?? ""}</p>
+      <p className="text-xs text-muted-foreground">
+        {item.permanent
+          ? "这条已被永久除名：索引里不会收录它，作者再次提交也不会回到复审队列。"
+          : STATUS_HINT[item.status] ?? ""}
+      </p>
 
       {item.status === "resubmitted" ? (
         <div className="rounded-md border border-border bg-secondary px-3 py-2 text-xs text-secondary-foreground">
