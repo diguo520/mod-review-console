@@ -2037,12 +2037,16 @@ export function useHome() {
     const candidates: Array<{ source: string; at: number }> = []
     for (const item of queueItems) {
       if (!item.source) continue
-      // 残缺条目要体检补全；已下架的要体检比对作者是否更新了版本（更新了就该退回复审）
+      // 删除留档已经退出工作队列（queueItems 本身也过滤了），这里再兜一层，别去烧额度
+      if (item.deleted) continue
+      // 只体检「能改变状态」的条目：
+      //   pending / resubmitted —— 资料不全，补齐了才能审核；
+      //   delisted —— 比对作者是否更新了版本（更新了就该退回复审）。
+      // 「未通过」不自动体检：来源已经被移出收录名单，拉一次清单不会改变任何状态；
+      // 作者真想回来只能重新登记，PR 一进 sources.json 就会自动变成「重新提交」。
+      // 否则作者一直不更新的那些被拒条目会越积越多，每开一次审核台就把额度重拉一遍。
       const wanted =
-        (!item.complete &&
-          (item.status === "pending" ||
-            item.status === "rejected" ||
-            item.status === "resubmitted")) ||
+        (!item.complete && (item.status === "pending" || item.status === "resubmitted")) ||
         item.status === "delisted"
       if (!wanted) continue
       if (inspectTriedRef.current.has(item.source)) continue
@@ -2064,6 +2068,8 @@ export function useHome() {
   useEffect(() => {
     if (loading || mode !== "manual") return
     if (!selected || selected.complete || !selected.source) return
+    // 删除留档只做回溯，未通过的条目要等作者重新登记 —— 两者都不值得自动去拉清单
+    if (selected.deleted || selected.status === "rejected") return
     if (selected.inspectStatus !== "idle") return
     void inspectSources([selected.source])
   }, [loading, mode, selected, inspectSources])

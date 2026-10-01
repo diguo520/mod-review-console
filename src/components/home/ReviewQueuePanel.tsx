@@ -254,8 +254,10 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                           体检中
                         </span>
                       ) : item.inspectStatus === "idle" ? (
+                        // 未通过的条目不再自动体检（来源已移出收录名单，拉清单不会改变任何状态），
+                        // 显示成「待体检」会让人以为它还在排队，这里如实标成等作者回来。
                         <span className="rounded-full border border-dashed border-primary/30 px-2.5 py-1 text-xs text-muted-foreground">
-                          待体检
+                          {item.status === "rejected" ? "待作者重新提交" : "待体检"}
                         </span>
                       ) : (
                         <span className="rounded-full border border-dashed border-border px-2.5 py-1 text-xs text-muted-foreground">
