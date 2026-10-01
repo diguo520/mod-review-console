@@ -189,6 +189,39 @@ openssl rand -base64 48
 
 Pages 项目 → **Custom domains** → 加 `mods.example.com`，按提示加 DNS 记录。
 
+### 2.5 自定义域上的缓存规则(2026-10-01 踩坑记录)
+
+挂在共享 zone 上的自定义域(例：`mod.5318.cm` 挂在 `5318.cm` 这个 zone 下)会**继承整条
+zone 的缓存规则**。`5318.cm` 上原本有两条针对论坛/CDN 的规则会误伤 Pages 站点：
+
+- `Cache static content`：凡是以 `.js` / `.css` / 图片等后缀结尾的请求，一律
+  **edge TTL 与浏览器 TTL 覆盖成 1 年**（忽略源站头）；
+- `Cache XenForo guest pages`：任何不带 `xf_*` cookie 的请求都改成「可缓存」，
+  于是**入口 HTML 也被缓存 4 小时**。
+
+后果：Pages 部署切换的那一小段时间里，边缘把还没同步的新 bundle 请求按「找不到资源」
+回退成 `index.html` 的内容，而 `.js` 的缓存规则把它当静态资源**按 1 年/TTL 缓存成
+`text/html`**。浏览器对 module script 有严格 MIME 校验，直接拒绝执行 → **整站白屏**
+（2026-10-01 实测线上白屏约 10 分钟，清理缓存后恢复）。
+
+正确做法（已在 `5318.cm` 上生效）：
+
+1. 在该 zone 的 **Caching → Cache Rules** 最前面加一条，把审核台这个域名整个绕过边缘缓存，
+   让 Pages 自己的响应头说了算：
+
+   ```text
+   (http.host eq "mod.5318.cm")
+   → Bypass cache (cache: false)
+   ```
+
+2. 给原有的两条规则补上排除条件：`... and http.host ne "mod.5318.cm"`。
+3. 本仓库 `public/_headers` 把入口 HTML 设成 `no-cache`（即每次都用 ETag 回源确认），
+   保证浏览器永远只引用当前部署的 bundle 文件名；带内容哈希的 `/assets/*` 保持 Pages 默认。
+
+改完记得在 Cloudflare 面板 **Caching → Configuration → Purge Everything** 清一次旧缓存。
+验收：`Invoke-WebRequest https://mod.5318.cm/` 应返回 `Cache-Control: no-cache`、
+`cf-cache-status: DYNAMIC`。
+
 ## 3. GitHub 令牌配在哪
 
 **结论: 配在 Cloudflare Pages 的环境变量里(`GITHUB_TOKEN`)，由服务端 Function 使用。**
@@ -441,27 +474,23 @@ npx wrangler secret put INDEX_SYNC_TOKEN --config cron/wrangler.toml
 全程没有打开控制台、没有手点同步接口 —— Cloudflare 定时任务 → Worker → 站点同步接口 → D1
 这条无人值守链路成立。
 
-### 11.4 索引仓库侧要做的一行改动
+### 11.4 索引仓库侧的触发条件（已就位）
 
-`diguo520/EVEjs-mods` 的 `.github/workflows/build-index.yml` 触发条件目前是：
+`diguo520/EVEjs-mods` 的 `.github/workflows/build-index.yml` 触发条件现在包含
+`moderation.json`，下架 / 拒绝收录写进去也会立刻重建索引：
 
 ```yaml
 on:
   push:
-    paths: [sources.json, scripts/**, .github/workflows/build-index.yml]
-```
-
-**下架 / 拒绝收录只改 `moderation.json`**，不会触发重建，索引不会更新。加一项即可：
-
-```yaml
-    paths: [sources.json, moderation.json, scripts/**, .github/workflows/build-index.yml]
+    paths: [sources.json, moderation.json, mods/**, scripts/**, .github/workflows/build-index.yml]
 ```
 
 （改 `.github/workflows/*` 需要令牌带 **Workflows: Read and write**；也可以直接在
 GitHub 网页上编辑这个文件，不占令牌权限。）
 
-不加也能用，只是**下架 / 拒绝收录的生效会晚到下一个整 6 小时**（工作流本身有
-`cron: "0 */6 * * *"` 兜底）；收录（approve）走 `sources.json`，本来就是即时触发。
+万一哪天这项被人去掉，也不会出错，只是**下架 / 拒绝收录的生效会晚到下一个整 6 小时**
+（工作流本身有 `cron: "0 */6 * * *"` 兜底）；收录（approve）走 `sources.json`，
+本来就是即时触发。
 
 ### 11.5 排查表
 
