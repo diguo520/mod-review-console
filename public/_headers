@@ -1,0 +1,14 @@
+# 入口 HTML 一律走「先问服务端再决定用不用缓存」（no-cache = 命中就用 304）。
+#
+# 为什么必须这样：Cloudflare Pages 在部署切换的一小段时间里，可能先放行新 HTML、
+# 却把还没同步到该边缘节点的新 bundle 请求按「找不到资源」回退成 index.html，
+# 于是资源 URL 被缓存成 text/html，浏览器按严格 MIME 校验直接拒绝执行 module script
+# —— 2026-10-01 实测线上白屏 10 分钟就是这个原因。
+# 入口 HTML 不缓 4 小时，浏览器每次都会拿到当前部署的 bundle 文件名，旧文件名不会被继续引用；
+# 回退出来的那份 HTML 也不会被浏览器长期缓存。
+# 带内容哈希的 /assets/* 不在这里列，继续保持长缓存。
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
