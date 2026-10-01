@@ -57,7 +57,8 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
   const listRef = useRef<HTMLDivElement | null>(null)
   const filtered = p.filterStatus !== "all" || p.keyword.trim().length > 0
   const activeOption = QUEUE_FILTERS.find((f) => f.value === p.filterStatus)
-  const pageSelectable = p.items.filter((item) => !item.deleted)
+  // 已删除、还在等同步的条目也能勾选：批量「永久删除」就是补同步的入口（重复删除是幂等的）
+  const pageSelectable = p.items
   const pageAllSelected =
     pageSelectable.length > 0 && pageSelectable.every((item) => p.selectedKeys.has(item.key))
   const selectedCount = p.selectedKeys.size
@@ -181,24 +182,22 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
               const checked = p.selectedKeys.has(item.key)
               return (
                 <li key={item.key} className="flex items-start gap-2">
-                  {item.deleted ? (
-                    <span aria-hidden className="mt-3.5 h-4 w-4 shrink-0" />
-                  ) : (
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => p.onToggleSelect(item)}
-                      aria-label={`勾选 ${item.displayName || item.source || item.modId}`}
-                      className="mt-3.5 h-4 w-4 shrink-0 cursor-pointer rounded border-border accent-primary"
-                    />
-                  )}
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => p.onToggleSelect(item)}
+                    aria-label={`勾选 ${item.displayName || item.source || item.modId}`}
+                    className="mt-3.5 h-4 w-4 shrink-0 cursor-pointer rounded border-border accent-primary"
+                  />
                   <button
                     type="button"
                     onClick={() => p.onSelect(item)}
                     className={cn(
                       "min-w-0 flex-1 rounded-md border p-3 text-left transition-colors focus-visible:shadow-focus focus-visible:outline-none",
                       item.deleted
-                        ? "border-dashed border-border bg-background/60 opacity-80"
+                        ? checked
+                          ? "border-dashed border-primary/50 bg-primary/10"
+                          : "border-dashed border-border bg-background/60"
                         : checked
                           ? "border-primary/50 bg-primary/10"
                           : active

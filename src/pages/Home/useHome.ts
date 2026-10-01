@@ -1464,12 +1464,11 @@ export function useHome() {
   }, [queueItems, queueAllItems, deletedItems])
 
   const selectedItems = useMemo(
-    () => queueItems.filter((item) => selectedKeys.has(item.key)),
-    [queueItems, selectedKeys],
+    () => queueAllItems.filter((item) => selectedKeys.has(item.key)),
+    [queueAllItems, selectedKeys],
   )
 
   const toggleSelect = useCallback((item: QueueItem) => {
-    if (item.deleted) return
     setSelectedKeys((prev) => {
       const next = new Set(prev)
       if (next.has(item.key)) next.delete(item.key)
@@ -1483,7 +1482,6 @@ export function useHome() {
     setSelectedKeys((prev) => {
       const next = new Set(prev)
       for (const item of items) {
-        if (item.deleted) continue
         if (on) next.add(item.key)
         else next.delete(item.key)
       }
