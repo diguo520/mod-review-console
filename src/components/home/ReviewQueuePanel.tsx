@@ -226,7 +226,27 @@ export function ReviewQueuePanel(p: ReviewQueuePanelProps) {
                       {item.publishedAt || "—"}
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {item.checks.length > 0 ? (
+                      {item.deleted ? (
+                        // 删除留档已经退出工作队列（不体检、不巡检、不进批量操作），
+                        // 所以不能再显示「待体检 / 信息不全」这种待办口吻的标签 —— 会让人
+                        // 以为它还在排队。这里明确标成已归档，永久除名的再补一枚终局标记。
+                        <>
+                          <span
+                            className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs text-secondary-foreground"
+                            title="已进入删除留档：不参与队列统计、体检与巡检，只在这里回溯"
+                          >
+                            已归档
+                          </span>
+                          {item.permanent ? (
+                            <span
+                              className="rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-1 text-xs text-destructive"
+                              title="永久除名：索引仓库的 moderation.json 里保留 permanent 标记，作者再次提交也不会复活"
+                            >
+                              永久除名
+                            </span>
+                          ) : null}
+                        </>
+                      ) : item.checks.length > 0 ? (
                         <CheckSummaryBadge status={summarizeChecks(item.checks)} />
                       ) : item.inspectStatus === "loading" ? (
                         <span className="inline-flex items-center gap-1 rounded-full border border-dashed border-primary/40 bg-primary/5 px-2.5 py-1 text-xs text-primary">

@@ -295,7 +295,12 @@ export const QUEUE_FILTERS: QueueFilterOption[] = [
   { value: "published", label: "已上架", hint: "已收录并在索引里生效", tone: "default" },
   { value: "rejected", label: "未通过", hint: "已被拒绝收录，作者修正后可重新提交", tone: "default" },
   { value: "delisted", label: "已下架", hint: "索引保留但已标记下架", tone: "muted" },
-  { value: "deleted", label: "已删除", hint: "已单独删除并留档，这里只做回溯", tone: "muted" },
+  {
+    value: "deleted",
+    label: "已删除",
+    hint: "已单独删除并从索引里剔除；这里只做回溯，不参与统计、体检与批量操作",
+    tone: "muted",
+  },
   { value: "all", label: "全部", hint: "工作队列全部条目（含已删除留档）", tone: "default" },
 ]
 
